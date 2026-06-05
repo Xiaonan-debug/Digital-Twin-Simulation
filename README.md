@@ -1,283 +1,204 @@
-# Co‑Diffusion: Self‑Certifying Diffusion Language Models
+# Relaxation Diffusion: Diffusion Language Models as Neural Constraint‑Propagation Reasoners
 
-**A research proposal for making correctness a _structural invariant_ of generation, not a post‑hoc behavior.**
+**A research proposal that takes the most striking — and unexplained — result in the papers in this folder and turns it into a new reasoning paradigm.**
 
-> **One‑line thesis.** The durable advantage of diffusion language models (DLMs) is **not** speed — it is that a bidirectional, iteratively‑refined canvas lets a model generate an answer *and a certificate that the answer is correct* **at the same time, on the same canvas, under a trained mutual‑consistency constraint**. This dissolves the ordering dilemma that makes autoregressive (AR) self‑verification post‑hoc and unfaithful, and turns "is this output trustworthy?" into a quantity the model computes *by construction*.
+> **TL;DR.** In the SPG paper (this folder), a diffusion LM beats a state‑of‑the‑art autoregressive RL model by **+27.0% on Sudoku** and **+18.4% on Countdown** — while the same models are nearly tied on GSM8K (+3.6%). That is not a small alignment delta; it is a *qualitative* gap that appears **only on constraint‑satisfaction / search problems**. No paper explains it. My thesis: **the denoising process of a diffusion LM is implicitly performing parallel constraint propagation**, a reasoning mechanism autoregressive (AR) models structurally cannot run. I propose to (1) establish this mechanistically, (2) show current DLMs do it only *weakly and accidentally*, and (3) build **Relaxation Diffusion** — a training + inference paradigm that makes the propagation **explicit, iterative, and learnable** by *decoupling belief‑refinement rounds from token‑commitment events* — yielding a general "reason‑by‑relaxation" engine for any language‑expressed constraint problem, with the size‑generalization that current DLMs lack.
 
 ---
 
 ## Table of Contents
-1. [What I read, and the shape of the field](#1-what-i-read-and-the-shape-of-the-field)
-2. [Motivation: the speed story is dying — find the durable prize](#2-motivation-the-speed-story-is-dying--find-the-durable-prize)
-3. [The core gap nobody owns](#3-the-core-gap-nobody-owns)
+1. [The observation that started this](#1-the-observation-that-started-this)
+2. [Why AR cannot do this, and DLMs accidentally can](#2-why-ar-cannot-do-this-and-dlms-accidentally-can)
+3. [The gap: implicit, weak, unscalable propagation](#3-the-gap-implicit-weak-unscalable-propagation)
 4. [Problem formulation](#4-problem-formulation)
-5. [Methodology](#5-methodology)
-6. [Theoretical grounding](#6-theoretical-grounding-why-this-needs-a-diffusion-lm)
-7. [Experimental plan](#7-experimental-plan)
-8. [Why this is novel (explicit differentiation)](#8-why-this-is-novel-explicit-differentiation)
-9. [Risks, limitations, and falsification](#9-risks-limitations-and-falsification)
-10. [Broader impact](#10-broader-impact)
-11. [References](#references)
+5. [Method: Relaxation Diffusion](#5-method-relaxation-diffusion)
+6. [Why this is novel (not A+B, not a decoding tweak)](#6-why-this-is-novel)
+7. [Experimental plan & falsifiable hypotheses](#7-experimental-plan--falsifiable-hypotheses)
+8. [Risks and limitations](#8-risks-and-limitations)
+9. [Alternative seeds (if you want a different flavor)](#9-alternative-seeds)
+10. [References](#references)
 
 ---
 
-## 1. What I read, and the shape of the field
+## 1. The observation that started this
 
-I read the ten papers in this directory and surveyed ~30 additional recent works. The DLM literature has organized itself into five mature clusters:
+Reading the ten papers here, almost every result is a *quantitative* improvement on a shared axis (speed, alignment, perplexity). One result is **qualitatively different** and is buried in a table:
 
-| Cluster | Representative work (this folder + field) | What it optimizes |
+| Benchmark (SPG, Fig. 1 / Table 1) | Best AR‑style DLM‑RL baseline | SPG | Gap |
+|---|---|---|---|
+| GSM8K (arithmetic) | 82.5 | 86.1 | **+3.6** |
+| MATH500 | 37.4 | 40.0 | +2.6 |
+| **Countdown** (reach a target number) | 52.3 | 70.7 | **+18.4** |
+| **Sudoku** (constraint grid) | 67.0 | 94.0 | **+27.0** |
+
+The same training algorithm yields a **single‑digit** gain on free‑form arithmetic and a **27‑point** gain on Sudoku. The differentiator between these tasks is not "math vs. not‑math." It is that **Countdown and Sudoku are global constraint‑satisfaction problems**: every cell/operation is coupled to many others, and a commitment made early must be consistent with constraints that only become visible later.
+
+LLaDA (this folder) hands us the second clue: it **breaks the reversal curse**, i.e. it can satisfy a constraint ("B precedes A") that an AR model, having committed to an order, cannot. Prophet (this folder) hands us the third: the canvas holds a *globally stabilizing belief* that settles over many refinement steps. Put together, these point at one mechanism the field has not named:
+
+> **Hypothesis (Propagation Hypothesis).** A masked diffusion LM solves a constraint problem by maintaining a *full‑canvas partial assignment* and iteratively revising it so that local predictions become globally consistent — i.e., its denoising trajectory is an *amortized, learned constraint‑propagation / relaxation algorithm*. The huge Sudoku/Countdown gaps are the signature of this mechanism; the small GSM8K gap is what you get when global coupling is weak and a sequential chain suffices.
+
+If true, this reframes what DLMs are *for*. The field sells DLMs on **speed** (now contested) and **likelihood**. The Propagation Hypothesis says the durable prize is a **different reasoning substrate**: parallel relaxation instead of sequential chaining.
+
+---
+
+## 2. Why AR cannot do this, and DLMs accidentally can
+
+Consider a constraint problem with variables $v_1,\dots,v_n$ and constraints $C$ coupling them.
+
+- **Autoregressive.** AR factorizes $p(v_1)\,p(v_2\mid v_1)\cdots$ under one fixed order and **commits irreversibly**. When it sets $v_2$, the constraints involving $v_7$ are not yet representable as conditioning context, so $v_2$ is chosen blind to them. If $v_7$ later forces $v_2$ to change, AR cannot go back. Chain‑of‑thought helps only by *serializing* the search into the context window — it is a single, linear search trajectory with no parallel propagation. This is the same structural limitation as the reversal curse, generalized from 2 variables to $n$.
+- **Masked diffusion.** A DLM holds *all* $n$ variables on one canvas and, at every step, re‑predicts each from the **bidirectional** context of all currently‑committed others. A commitment to $v_7$ immediately changes the prediction for $v_2$ on the next step. Low‑confidence remasking even lets the model *defer* coupled variables until enough constraints have propagated. This is, structurally, one sweep of **iterative refinement over a factor graph** — exactly the shape of belief propagation / WalkSAT‑style local search.
+
+So DLMs get constraint propagation **for free, as a side effect of bidirectional iterative denoising.** That is why SPG sees 27 points on Sudoku. But — crucially — they get it *accidentally and weakly*, which is the opening for real research.
+
+---
+
+## 3. The gap: implicit, weak, unscalable propagation
+
+Current DLMs conflate two things that constraint solvers keep separate:
+
+| Constraint solver | Current DLM | Problem |
 |---|---|---|
-| **Foundations / scaling** | LLaDA (8B masked diffusion rivals LLaMA‑3) | Can diffusion *be* an LLM at all |
-| **Continuous / latent formulations** | LangFlow, ELF, Cola‑DLM, LaDiR | Embedding/latent‑space diffusion vs. discrete |
-| **Inference efficiency** | Prophet (early‑commit), DPad (suffix dropout), d²Cache (KV cache), EDIT, Window‑Diffusion | Make DLMs *fast* |
-| **Test‑time scaling / search** | S³, RFG, Reward‑Guided Stitching, Diffuse Thinking | Spend more compute for accuracy |
-| **Alignment / steering / RL** | SPG (sandwiched policy gradient), DDPP (posterior steering), UniSteer | Make DLMs *aligned* |
+| **Propagation step** (refine beliefs / prune candidate values, *no commitment*) | — fused into the same forward pass that also commits tokens | The model gets **one** propagation round per token revealed, then must commit. Hard problems need *many* propagation rounds before *any* safe commitment. |
+| **Decision/commitment** (assign a variable) | low‑confidence remasking commits the *most certain* token each step | Commits the *easy* variables first (least information), starving the propagation that would resolve the *hard*, coupled ones. |
+| **Backtracking** | once unmasked, frozen | A wrong early commitment is unrecoverable; error compounds — the well‑known accumulation problem. |
 
-Two papers in this folder are especially load‑bearing for my argument:
-
-- **LLaDA** establishes the substrate: a non‑causal Transformer that predicts *all* masked tokens simultaneously and refines a full‑sequence canvas from `t=1` (all mask) to `t=0` (unmasked). Crucially, it breaks the **reversal curse**, the first hint that bidirectional refinement buys a *structural* capability, not just a different sampler.
-- **"Diffusion LM Knows the Answer Before It Decodes"** (Prophet) shows **early answer convergence**: on GSM8K/MMLU the answer is internally fixed by ~half the steps. The field reads this as *"steps are wasted, cut them."* I read it as *"the canvas holds a stable belief about the answer long before it is emitted — so there is room, during the remaining steps, to make the rest of the canvas **prove** that belief."*
-
-Everyone is mining the first four clusters for incremental speed/accuracy. The fifth (alignment) treats verification as something you *bolt on* with RL. **No one is using the canvas itself as a place where an answer and its justification co‑exist and constrain each other.** That is the gap I take.
-
----
-
-## 2. Motivation: the speed story is dying — find the durable prize
-
-The original pitch for DLMs was **parallel decoding ⇒ speed**. That pitch is now contested from inside the field:
-
-- Critical evaluations ("How Efficient Are Diffusion Language Models, Really?") show the throughput advantage largely evaporates once quality is held fixed, because parallel decoding degrades quality and DLMs cannot natively KV‑cache. The efficiency cluster (d²Cache, DPad, Prophet) is essentially a multi‑year effort to *claw back* the speed that bidirectionality costs.
-- The knowledge‑efficiency advantage ("Diffusion Beats AR in Data‑Constrained Settings") is real but is being commoditized into *dual‑objective* AR+MDM training, which an AR model can adopt without ever generating by diffusion.
-
-**If speed and data‑efficiency are both being absorbed, what is the _durable_, AR‑inaccessible reason DLMs should exist?** I claim it is **structural verifiability**, and it follows directly from the one thing AR can never do: *let a later part of the output revise an earlier part.*
-
-#### The faithfulness dilemma that AR cannot escape
-
-Consider any task where an output should be *justified*: math (answer + reasoning), code (program + spec/tests), factual QA (claim + evidence), planning (plan + feasibility proof). An AR model must pick an order:
-
-- **Justify‑then‑answer** (chain‑of‑thought first). The justification is committed *before* the answer exists, so it cannot be revised once the answer is known. Worse, the answer is then forced to be consistent with a rationale the model can no longer touch.
-- **Answer‑then‑justify.** The justification is now *post‑hoc rationalization* — the well‑documented **CoT unfaithfulness** problem: the stated reasons are not the computational cause of the answer, and models will confidently fabricate support for a wrong answer.
-
-The entire AR self‑verification literature (V1, CoVerRL, Chain‑of‑Verification, "Incentivize LLMs to self‑verify") lives inside this dilemma: it runs verification as a **second, sequential pass** and uses **RL to *incentivize*** honesty — a behavior we hope the model adopts, not a property of the architecture.
-
-**A DLM has no order to pick.** On a bidirectional canvas, the answer region and the justification region are denoised *together*; bidirectional attention lets each condition on the other at every step. The answer can shape the proof *and the proof can shape the answer*, iterating to a mutually‑consistent fixed point. Faithfulness stops being a behavior to be incentivized and becomes a **constraint to be satisfied.** That is the durable, AR‑inaccessible prize — and no one is building for it.
-
----
-
-## 3. The core gap nobody owns
-
-> **Gap.** DLMs are the only language models that can hold, refine, and mutually constrain *two interdependent artifacts on one canvas*. The field has spent this capability entirely on making one artifact (the answer) faster or more accurate. It has never spent it on **co‑generating the answer together with a machine‑checkable certificate of the answer's own correctness, such that inconsistency between them is (a) trained toward zero and (b) read off at inference as a calibrated, *spatially‑localized* trust signal.**
-
-This single mechanism, if it works, simultaneously attacks four open problems that are currently chased separately:
-
-1. **Faithful reasoning / CoT** → the certificate *is* the reasoning, and it is structurally bound to the answer.
-2. **Hallucination detection / UQ** (DynHD et al.) → residual claim↔certificate inconsistency is an *intrinsic* confidence signal, not an external probe.
-3. **Self‑correction** (RemeDi, SCOPE) → inconsistency is the *signal that drives* which tokens to re‑mask, replacing hand‑tuned confidence heuristics with a principled "repair the contradiction" rule.
-4. **Test‑time scaling** (S³, RFG) → extra compute is spent reducing a *meaningful* objective (the inconsistency field) rather than re‑converging to the same MAP estimate.
-
-I am **not** proposing "DLM + a verifier model" (that would be A+B, and the AR world already does sequential generate‑then‑verify). I am proposing a *single model* that learns a generative process whose **fixed points are self‑consistent answer/certificate pairs.**
+The result: implicit propagation that works on small grids (Sudoku 4×4/9×9) but **does not scale** with constraint density or problem size, and that no one has tried to strengthen *as propagation*. The self‑correction line (RemeDi, SCOPE) patches the backtracking row only, with confidence heuristics and no notion of *constraints*. The decoding‑order line (Where‑to‑Unmask, Info‑Gain sampling) patches the decision row only, still committing every step. **Nobody has decoupled propagation from commitment, which is the heart of how real solvers work.** That decoupling is my method.
 
 ---
 
 ## 4. Problem formulation
 
-### 4.1 Setup
+A task instance is a natural‑language specification $c$ that *induces* a (possibly implicit) constraint system over an answer canvas $x=(x_1,\dots,x_n)$: a set of constraints $\mathcal{C}(c)=\{C_k\}$ where each $C_k$ couples a subset of positions and a checker returns satisfaction $V(x)\in\{0,1\}$ (a Sudoku validator, an arithmetic‑to‑target evaluator, a graph‑coloring check, a logic‑grid solver, a "does this code satisfy its asserted invariants" checker). $V$ is used for **training and evaluation only**; the deployed model uses no solver.
 
-Let a task instance be a prompt $c$ (e.g., a math problem, a function signature + docstring, a factual question). A DLM defines a denoiser $f_\theta$ that maps a partially‑masked sequence $x_t$ to per‑position distributions over the vocabulary $\mathcal V \cup \{\textsf{[MASK]}\}$.
+Define a per‑position **belief** $b_i \in \Delta(\mathcal V)$ (a distribution over candidate tokens) and the canvas belief $B=(b_1,\dots,b_n)$. We want a learned operator $T_\theta$ such that iterating $B \leftarrow T_\theta(B, c)$ **converges to a belief whose mode satisfies $\mathcal C(c)$**, i.e. $T_\theta$ is trained to be a *contraction toward constraint‑consistent fixed points*. A standard DLM is the special case where $T_\theta$ is applied **once per commitment** and beliefs are immediately argmax‑ed and frozen. Relaxation Diffusion lets $T_\theta$ iterate *internally* and commit *lazily*.
 
-We partition the generated canvas into two **strands** laid out on the *same* sequence and attended to *bidirectionally*:
-
-- **Claim strand** $a$ — the answer/solution the user consumes (e.g., the final numeric answer + solution, or the program body).
-- **Certificate strand** $z$ — a machine‑checkable witness that *entails or tests* the claim, drawn from a **task‑specific certificate grammar** $\mathcal G$ (examples below). $z$ is generated by the *same* model, not a separate one.
-
-| Domain | Claim $a$ | Certificate $z$ (grammar $\mathcal G$) | Checker $V$ |
-|---|---|---|---|
-| Arithmetic / math | final answer + steps | a set of intermediate equalities / a verifier‑friendly derivation | symbolic equality / a tiny rule engine |
-| Code | function body | unit tests + type/pre‑post conditions the body must satisfy | execute tests; type‑check |
-| Constraint puzzles (Sudoku, Countdown) | filled solution | the per‑cell/per‑op constraints the solution claims to meet | constraint propagator |
-| Factual QA | answer claim | cited supporting evidence spans + an entailment label | NLI / retrieval match |
-
-The key property of $\mathcal G$: there exists a **checker** $V(a,z)\in[0,1]$ — *cheap, possibly non‑differentiable, possibly symbolic* — that returns how well claim $a$ satisfies its own certificate $z$. $V$ is used at **training time** (as a reward and to mine hard negatives) and, where available, at **inference time** as a guardrail; the model is trained to *internalize* it so $V$ is **not required** at inference.
-
-### 4.2 Objective (informal)
-
-We want a generative process whose samples $(a,z)$ are:
-
-- **Plausible**: $p_\theta(a,z\mid c)$ is high (fluent, on‑task) — standard diffusion likelihood.
-- **Self‑consistent**: $V(a,z)=1$ — the claim genuinely satisfies its own certificate.
-- **Grounded**: $z$ is a valid certificate *of this prompt* (it cannot be a trivial tautology) — enforced by $\mathcal G$ and an entailment term $E(c,z)$.
-
-Formally, we target the **product distribution**
-
-$$
-\pi(a,z\mid c)\;\propto\;p_\theta(a,z\mid c)\,\cdot\,\underbrace{\exp\big(\beta\,[\,V(a,z)+\lambda\,E(c,z)\,]\big)}_{\text{consistency \& grounding tilt}} ,
-$$
-
-i.e. a base DLM *steered* toward the self‑consistent, grounded slice of its own output space. This is deliberately the **same mathematical shape** as reward‑tilted MDM steering (cf. DDPP's Bayesian‑posterior view and SPG's sandwiched bounds), which means we can borrow their estimators — but here the "reward" is the model's *own internal consistency*, computed on a strand the model itself wrote. That self‑referential closure is what makes it new.
+**Goal.** Learn $T_\theta$ (initialized from a pretrained DLM) so that, with an *adaptive* number of internal propagation rounds, the model (i) solves harder/denser constraint instances than a vanilla DLM at equal parameter count, (ii) **generalizes to larger instances than seen in training**, and (iii) transfers to *novel constraint types described in natural language* at inference.
 
 ---
 
-## 5. Methodology
+## 5. Method: Relaxation Diffusion
 
-### 5.1 Canvas layout and the dual‑strand forward process
+Three coupled ideas. The first is the core novelty; the others make it trainable.
 
-A training example is the concatenation `[c] [SEP] [a] [SEP] [z]`. The forward (corruption) process differs from vanilla LLaDA in two deliberate ways:
+### 5.1 Decouple propagation from commitment ("belief‑refinement rounds")
 
-1. **Asymmetric masking schedules per strand.** We draw *two* independent mask levels $t_a, t_z \sim U[0,1]$ for the claim and certificate strands. Training on the full $(t_a,t_z)$ square — including the corners — is what teaches the four inference modes we need:
-   - $t_a\!\downarrow, t_z\!\uparrow$: *given the answer, write its certificate* (verification skill).
-   - $t_a\!\uparrow, t_z\!\downarrow$: *given the certificate, write the answer* (constraint‑guided solving).
-   - both high: *co‑generate from scratch* (the deployment mode).
-   - both low: *check / repair* a nearly‑complete pair.
-
-   AR cannot be trained on the off‑diagonal corners coherently; the bidirectional canvas can.
-
-2. **Adversarial substitution corruption (ASC) — the crucial ingredient.** Standard masked diffusion *only ever maps `[MASK] → token`*; it never sees a *wrong, committed* token, so it never learns that an answer can contradict its certificate. We additionally corrupt a fraction of *unmasked* claim tokens by **substituting hard negatives**: plausible‑but‑wrong values mined from (i) the model's own earlier‑checkpoint samples that fail $V$, and (ii) perturbations that flip $V(a,z)$ from 1→0. The model is trained to *detect and repair* these — i.e., to drive the canvas back onto the $V\!=\!1$ manifold. This is the training signal that vanilla MDMs structurally lack, and it is what makes the inconsistency field at inference *mean something*.
-
-### 5.2 Reverse process: co‑denoising to a consistency fixed point
-
-At inference we start from a fully‑masked $(a,z)$ canvas and run co‑denoising. Each step the model emits, per position, both a token distribution **and** a scalar **inconsistency estimate** $u_i\in[0,1]$ from an auxiliary head (trained against the ASC labels and against $1-V$). The remasking rule is the heart of the method:
+Replace the one‑pass "predict → commit lowest‑uncertainty" loop with a two‑timescale loop:
 
 ```text
-Co-Diffusion decoding (one macro-step)
-  1. Predict token distributions for all masked positions on BOTH strands (one bidirectional forward pass).
-  2. Predict the inconsistency field u over ALL positions (committed + masked).
-  3. Commit low-uncertainty AND low-inconsistency tokens (standard confidence ∧ consistency gate).
-  4. RE-MASK already-committed tokens whose u is high  ← true revision, claim↔certificate driven.
-  5. Halt when the global inconsistency  U = mean_i u_i  drops below τ  (learned fixed-point criterion),
-     OR escalate compute (Step 6) if U plateaus above τ.
-  6. (Test-time scaling) If stuck in a high-U local optimum: partial RE-NOISE of the highest-u contiguous
-     region (push it back up the diffusion ladder) and re-settle — a "shake the contradiction loose" move.
+Relaxation Diffusion decoding
+  initialize all positions to [MASK]; beliefs B uniform
+  repeat (macro = commitment events):
+     # ---- inner loop: PROPAGATION, no commitment ----
+     repeat r times (r chosen adaptively, see 5.3):
+        B <- T_theta(B, c)            # bidirectional pass updates ALL beliefs from current beliefs
+                                       # (soft input: feed belief-weighted embeddings, not hard tokens)
+        if beliefs are stable (ΔB < ε): break
+     # ---- commitment: lazy & decisive ----
+     commit positions whose belief is BOTH sharp AND consistent (low marginal constraint-violation);
+     leave coupled/contended positions masked for further propagation
+  until all committed
 ```
 
-Three things fall out for free:
+Key departures from every current DLM:
+- **Soft, recirculated beliefs.** The model conditions on *belief‑weighted* (soft) token embeddings of not‑yet‑committed positions, not on `[MASK]`. This lets partial information ("$v_2 \in \{3,7\}$") propagate, rather than collapsing to "unknown." This is the discrete analog of running the diffusion ODE without rounding — and it is what gives the model *candidate sets* to propagate, the thing a solver needs.
+- **Internal rounds $r>1$ per commitment.** Hard, densely‑coupled instances get many propagation sweeps before any variable is fixed; easy ones get $r=1$ and behave like a normal DLM. Compute is spent where coupling is high.
+- **Lazy, constraint‑aware commitment.** Commit only positions that are sharp *and* not in active contention, the opposite of "commit the most confident token regardless."
 
-- **Self‑correction without heuristics.** Step 4 re‑masks because of a *contradiction with the certificate*, not because of a hand‑set confidence threshold (contrast RemeDi/SCOPE, which must learn what "low quality" means with no anchor).
-- **Calibrated, spatially‑localized trust.** The final inconsistency field $u$ tells the user *which spans to distrust*; the global $U$ gives a single calibrated confidence. Setting an abstention threshold on $U$ yields **selective generation** ("I'm not sure" instead of a confident wrong answer) — natively, with no extra UQ machinery (contrast DynHD, which trains a separate deviation detector).
-- **Meaningful test‑time scaling.** Step 6 spends extra steps reducing $U$, a quantity correlated with correctness — so more compute buys *more proof*, giving the step‑count → accuracy scaling law the field has been trying to manufacture with external search.
+### 5.2 Training $T_\theta$ as a propagation operator
 
-### 5.3 Training objective
-
-Total loss over the $(t_a,t_z)$ corruption square:
+Initialize from LLaDA/Dream and fine‑tune with three terms over a curriculum of constraint problems:
 
 $$
-\mathcal L(\theta)=\underbrace{\mathcal L_{\text{MDM}}^{a}+\mathcal L_{\text{MDM}}^{z}}_{\text{(1) reconstruct both strands}}
-\;+\;\gamma\,\underbrace{\mathcal L_{\text{incons}}}_{\text{(2) predict } u \text{ vs. ASC/V labels}}
-\;+\;\eta\,\underbrace{\mathcal L_{\text{repair}}}_{\text{(3) fix substituted tokens}}
-\;+\;\rho\,\underbrace{\mathcal L_{\text{consistency-RL}}}_{\text{(4) drive } V(a,z)\to 1}.
+\mathcal L = \underbrace{\mathcal L_{\text{MDM}}}_{\text{(1) keep base capability}} \;+\; \lambda_p\,\underbrace{\mathcal L_{\text{prop}}}_{\text{(2) match propagation targets}} \;+\; \lambda_v\,\underbrace{\mathcal L_{\text{solve}}}_{\text{(3) RL on } V}.
 $$
 
-- **(1)** is the standard LLaDA cross‑entropy on masked tokens (Eq. 3 of LLaDA), applied to *both* strands — so the base model retains full DLM capability and the proposal is a *drop‑in finetune on any LLaDA/Dream‑class checkpoint*, not a from‑scratch effort.
-- **(2)** trains the inconsistency head: a per‑position binary/regression target = "was this token an ASC hard‑negative?" ∪ "does the current pair fail $V$ here?".
-- **(3)** is cross‑entropy *on substituted (non‑mask) positions* — the term that teaches token→token correction, absent from all standard MDMs.
-- **(4)** is the consistency tilt. Because the DLM log‑likelihood is intractable, we estimate the policy gradient with **SPG‑style sandwiched bounds** (upper+lower bound the log‑likelihood of high‑$V$ vs low‑$V$ pairs), inheriting SPG's lower‑bias estimator wholesale. Reward $=V(a,z)+\lambda E(c,z)$ requires **no human labels** — it is computed by the symbolic checker on the model's own output, so this scales without annotation.
+- **(1)** standard masked‑token cross‑entropy (so general language ability is preserved; this is a fine‑tune, not from scratch).
+- **(2) Propagation supervision.** For synthetic constraint tasks we *have a solver*, so we can generate **intermediate ground‑truth partial assignments** (the candidate sets after $k$ rounds of arc‑consistency / unit propagation) and train the inner operator $T_\theta$ to reproduce that belief‑sharpening trajectory. This directly teaches "what a propagation round should do," rather than hoping it emerges. (Where solvers are unavailable, this term is dropped and we rely on (3).)
+- **(3) Solve reward.** RL on terminal correctness $V(x)$, using **SPG's sandwiched‑bound estimator** (this folder) to get a low‑bias policy gradient through the intractable DLM likelihood — reused wholesale, not re‑invented. The reward needs no human labels (the checker computes it).
 
-**Two‑phase recipe.** (a) *Cold start*: supervised co‑diffusion on datasets where certificates exist or are cheaply synthesizable (math with extractable equalities; code with generated tests; puzzles with their constraints). (b) *Self‑play refinement*: the model proposes $(a,z)$ pairs, the checker $V$ scores them, ASC hard‑negatives are refreshed from current failures, and phases (3)+(4) tighten the consistency fixed point — a label‑free virtuous cycle analogous to AR generator‑verifier co‑evolution, but realized *inside one bidirectional sampler* instead of two sequential passes.
+A **curriculum** scales problem size and constraint density upward, and the propagation‑supervision target (2) is exactly what enables **size generalization**: a model that has learned the *operator* (one consistent propagation step) rather than memorized solutions can apply it for more rounds on larger graphs.
 
-### 5.4 Efficiency and compatibility
+### 5.3 Adaptive propagation budget (where test‑time compute should go)
 
-Co‑Diffusion is deliberately orthogonal to the efficiency cluster: the certificate strand roughly doubles canvas length, but (i) **DPad's** suffix‑dropout and (ii) **d²Cache's** adaptive KV reuse apply unchanged, and (iii) the certificate strand is *exactly* the kind of "scratchpad/reservoir" DPad already prunes aggressively, so the marginal cost is far below 2×. The learned halting on $U$ (§5.2) also tends to *shorten* runs on easy instances — recovering Prophet‑style early exit, but exiting on a *correctness* criterion rather than raw confidence.
+The number of inner rounds $r$ and the commitment threshold are governed by a learned **contention signal** — the total disagreement between a position's current belief and what its neighbors' beliefs imply (a learned, soft analog of "number of violated constraints"). High contention ⇒ keep propagating, don't commit. This gives a *principled* test‑time scaling axis (more compute on harder instances), distinct from external search (S³, RFG): the extra compute is **internal propagation toward a fixed point**, not sampling more trajectories.
+
+### 5.4 Efficiency
+
+The inner loop costs $r\times$ forward passes per macro‑step, but (i) $r$ is adaptive (≈1 on easy regions), and (ii) it is fully compatible with the efficiency stack in this folder — d²Cache's KV reuse across the (highly similar) inner rounds and DPad's suffix dropout apply directly, so propagation rounds are cheap.
 
 ---
 
-## 6. Theoretical grounding: why this needs a diffusion LM
+## 6. Why this is novel
 
-**Claim.** Faithful co‑generation of mutually‑constraining strands is *expressible* by a bidirectional masked‑diffusion model and *not* by a left‑to‑right AR factorization without an external second pass.
+| Existing line | What it does | Why Relaxation Diffusion is different |
+|---|---|---|
+| **SPG / d1 / UniGRPO** (RL for DLMs) | Better policy gradient; *observe* the Sudoku gap | We **explain** the gap (propagation) and **amplify** it; SPG's estimator is *reused* as a component, not the contribution. |
+| **Decoding‑order / planner** (Where‑to‑Unmask, Info‑Gain, dUltra) | Choose *which* token to commit next, still **commit every step** | We **decouple propagation from commitment** and add **internal belief‑refinement rounds** — a mechanism these do not have. |
+| **Self‑correction** (RemeDi, SCOPE) | Re‑mask "low‑quality" committed tokens | We avoid bad commitments *in the first place* via lazy, contention‑aware commitment; correction is a consequence, not the method. |
+| **Test‑time search** (S³, RFG, stitching) | Sample/search **many external trajectories** + a reward model | Extra compute is **internal propagation to a fixed point** in *one* trajectory; no external PRM or trajectory bank. |
+| **Diffusion for combinatorial optimization** (graphs/TSP, other domains) | Diffusion over a fixed graph structure | Ours operates over **language‑expressed, open‑vocabulary** constraints given in natural language at inference, on a pretrained LM. |
 
-*Sketch.* A self‑consistent pair is a **fixed point** of the map $(a,z)\mapsto(\,\arg\!\max_a p(a\mid z,c),\ \arg\!\max_z p(z\mid a,c)\,)$. Reaching such a fixed point requires conditioning $a$ on $z$ **and** $z$ on $a$ within one generative object. An AR model factorizes $p(a,z\mid c)=\prod_i p(\cdot\mid \text{prefix})$ under a single linear order; whichever strand comes first is generated *without* the other and is then frozen, so the model can represent at most a *one‑directional* conditional, never the joint fixed point — exactly the faithfulness dilemma of §2, now stated as a representational fact. A masked DLM's reverse process, by contrast, is a sequence of bidirectional updates whose stationary points are precisely the joint‑consistent configurations; the consistency tilt of §4.2 reshapes the energy so those stationary points coincide with $V\!=\!1$. This also recovers LLaDA's reversal‑curse result as the trivial two‑token special case ("A is B" ⇔ "B is A" is the minimal mutual‑constraint), and *generalizes* it from token order to artifact‑level co‑determination.
-
-The objective in §4.2 is a valid steering of the base DLM: it is the same reward‑tilted posterior that DDPP shows is approximable simulation‑free for MDMs, and the SPG sandwiched bounds give a low‑bias gradient — so the construction stands on existing, peer‑reviewed estimators rather than new unproven machinery.
+The contribution is **(a)** a mechanistic account of why DLMs are a distinct reasoning substrate (parallel relaxation vs. sequential chaining), grounded in a result from the provided papers; and **(b)** a training/inference paradigm — *propagation/commitment decoupling with soft recirculated beliefs and adaptive internal rounds* — that turns an accidental, unscalable side effect into a deliberate, size‑generalizing capability. Neither is a combination of two prior methods, and neither is a decoding heuristic.
 
 ---
 
-## 7. Experimental plan
+## 7. Experimental plan & falsifiable hypotheses
 
-**Base models.** Finetune LLaDA‑8B (and Dream‑7B for replication) — no from‑scratch training needed.
+**Base models.** Fine‑tune LLaDA‑8B and Dream‑7B (drop‑in; no from‑scratch training).
 
-**Tasks & checkers $V$.**
-- **GSM8K / MATH** — certificate = intermediate equalities; $V$ = symbolic equality check.
-- **HumanEval / MBPP** — certificate = generated unit tests + pre/post‑conditions; $V$ = execution + type‑check.
-- **Sudoku / Countdown** — certificate = claimed constraints; $V$ = propagator. (SPG shows DLMs already over‑perform here, an ideal stress test.)
-- **Factual QA (e.g., PopQA / long‑tail)** — certificate = evidence spans + NLI label; $V$ = retrieval/entailment.
+**Tasks (with checkers $V$ and solvers for propagation targets).** Sudoku (variable grid size — the size‑generalization stress test), Countdown, graph coloring, logic‑grid puzzles, job‑shop scheduling, SAT/CSP expressed in natural language, and constrained code (functions that must satisfy asserted invariants). Plus GSM8K/MATH to confirm we do not regress weakly‑coupled reasoning.
 
 **Headline hypotheses (each independently falsifiable).**
-- **H1 (faithfulness).** Co‑Diffusion certificates are *causally* bound to answers: perturbing the certificate changes the answer far more than for AR answer‑then‑justify (measured via counterfactual interventions on the certificate strand). *If not, the structural‑faithfulness claim fails.*
-- **H2 (intrinsic UQ).** Global inconsistency $U$ separates correct from incorrect outputs better (AUROC) than entropy/confidence baselines and than DynHD‑style external detectors, **with no extra trained detector.**
-- **H3 (selective generation).** At matched coverage, abstaining on high‑$U$ yields strictly higher selective accuracy than AR self‑verify and than DLM confidence thresholding.
-- **H4 (meaningful scaling).** Accuracy increases monotonically with re‑noise budget (§5.2 Step 6) and the gains correlate with $\Delta U$, whereas vanilla DLM extra steps saturate (the Prophet observation) — demonstrating compute that buys *proof*, not just refinement.
-- **H5 (self‑correction without heuristics).** Inconsistency‑driven re‑masking recovers more injected ASC errors than confidence‑driven re‑masking (RemeDi/SCOPE‑style) at equal step budget.
+- **H1 (mechanism).** Intermediate canvases of a *vanilla* DLM already encode partial‑assignment "candidate sets" that sharpen monotonically — i.e. probing recovers solver‑like belief states. *If not, the Propagation Hypothesis is wrong and the framing fails.*
+- **H2 (decoupling helps).** At equal parameters and equal *total* compute, adaptive internal propagation rounds beat one‑pass‑per‑commit DLMs, with the **gap growing in constraint density** and approaching zero on weakly‑coupled GSM8K.
+- **H3 (size generalization).** A model trained with propagation supervision on $n\le N$ solves $n>N$ instances far better than a vanilla DLM trained on the same data — evidence it learned an *operator*, not solutions.
+- **H4 (compute allocation).** The learned contention signal correlates with true #violated‑constraints, and accuracy scales with internal rounds on hard instances while saturating on easy ones (a clean internal test‑time‑scaling law).
+- **H5 (NL transfer).** The model solves *novel constraint types* described only in natural language at inference (no such constraint in training), which AR+CoT and vanilla DLMs fail — the payoff that distinguishes "learned a general relaxation engine" from "memorized a puzzle."
 
-**Ablations.** Remove ASC (→ show the inconsistency field becomes uninformative — the load‑bearing test); remove certificate strand (→ collapses to LLaDA, isolating the co‑generation effect); single‑strand sequential verify on the *same* DLM (→ isolates *bidirectional* vs. *sequential* verification); replace symbolic $V$ with a learned reward (→ test reliance on symbolic checkers).
+**Baselines.** Vanilla LLaDA (low‑confidence remasking), LLaDA+Where‑to‑Unmask, LLaDA+RemeDi, SPG, AR LLaMA‑3‑8B with CoT and with external search/verification.
 
-**Primary baselines.** LLaDA + low‑confidence remasking; LLaDA + Prophet early‑commit; LLaDA + RemeDi self‑remasking; AR (LLaMA‑3‑8B) with Chain‑of‑Verification and with V1‑style joint self‑verification; SPG‑aligned LLaDA.
-
----
-
-## 8. Why this is novel (explicit differentiation)
-
-| Prior line | What it does | Why Co‑Diffusion is different (not A+B, not incremental) |
-|---|---|---|
-| **AR self‑verification** (V1, CoVerRL, Chain‑of‑Verification, self‑verify‑RL) | Generate, *then* verify in a second pass; RL *incentivizes* honesty | Verification is **simultaneous and bidirectional**; faithfulness is a **structural constraint**, not an RL‑induced behavior. Impossible in AR (§6). |
-| **DLM self‑correction** (RemeDi, SCOPE, T2M remasking) | Re‑mask "low‑quality" committed tokens to revise one strand | Re‑masking is driven by an **explicit claim↔certificate contradiction**, not a heuristic confidence/quality score with no anchor. |
-| **DLM UQ / hallucination** (DynHD, "Optimizing Decoding Paths by Uncertainty") | Train an external detector on denoising dynamics | The trust signal $U$ is the **same quantity being optimized during generation** — intrinsic, no separate detector, spatially localized. |
-| **DLM test‑time scaling** (S³, RFG, Reward‑Guided Stitching, Diffuse Thinking) | External search/PRM over many trajectories | Extra compute reduces an **internal, self‑written consistency objective**; single‑sampler, no external PRM or trajectory bank. |
-| **DLM RL/steering** (SPG, DDPP) | Align to *external* rewards | The "reward" is the model's **own internal consistency on a strand it wrote** — self‑referential, label‑free. (SPG/DDPP are *reused as estimators*, not the contribution.) |
-| **DLM efficiency** (Prophet, DPad, d²Cache) | Make one strand faster | Orthogonal and **reused**; halting becomes a *correctness* criterion, not a confidence one. |
-
-The contribution is a **new generative paradigm** — answer and certificate as one mutually‑constrained diffusion object — plus the **ASC training signal** and the **inconsistency‑field controller** that make it learnable and useful. It reframes four separate research threads as consequences of one mechanism that *only a bidirectional, iteratively‑refined DLM can implement.*
+**Ablations.** Remove soft beliefs (hard `[MASK]` only) → isolates the candidate‑set effect; remove propagation supervision (2) → tests whether RL alone discovers propagation; fix $r=1$ → collapses to a normal DLM; remove lazy commitment → tests the commitment policy.
 
 ---
 
-## 9. Risks, limitations, and falsification
+## 8. Risks and limitations
 
-- **Certificate‑gaming.** The model could co‑generate a trivially‑true certificate (tautology) that the answer satisfies vacuously. *Mitigations:* the grounding term $E(c,z)$ (certificate must be entailed by the prompt), a minimum‑informativeness penalty, and adversarial certificate audits. *Falsifier:* if $U$ stays low while accuracy drops, the certificate is being gamed → idea fails as stated.
-- **Domains without cheap checkers.** Open‑ended writing has no symbolic $V$. Scope v1 to *verifiable* domains (math, code, puzzles, grounded QA); learned $V$ for soft domains is explicitly future work, not claimed now.
-- **Cost.** ~2× canvas; argued down via DPad/d²Cache (§5.4), but must be measured, not assumed.
-- **ASC distribution.** If hard negatives are unrealistic, the inconsistency head won't transfer to genuine model errors. The self‑play refresh (§5.3) is designed to keep negatives in‑distribution; H5/ablation directly tests this.
-
-I would consider the program **falsified** if H1 (causal faithfulness) and H2 (intrinsic UQ) both fail — that would show the certificate strand is decorative rather than load‑bearing.
+- **Maybe the Sudoku gap is data, not mechanism.** H1 is the make‑or‑break probe; if vanilla canvases don't encode candidate sets, I will report that as a negative result and the framing dies cleanly.
+- **Soft‑belief recirculation may be unstable** (a known issue for continuous relaxations of discrete inference). Mitigations: damping/temperature on $T_\theta$, and EBM/MCMC‑style corrected updates (cf. *Reduce, Reuse, Recycle*).
+- **Propagation supervision needs solvers**, so it is limited to verifiable/synthesizable domains for the supervised term; term (3) (RL) extends to domains with only a checker. Truly open‑ended language is out of scope for v1.
+- **Cost** of inner rounds — argued down via adaptivity + d²Cache/DPad, but must be measured.
 
 ---
 
-## 10. Broader impact
+## 9. Alternative seeds
 
-Verifiable‑by‑construction generation is most valuable exactly where LLMs are least trusted: clinical, legal, financial, and scientific settings, and autonomous agents that must *know when they don't know* and abstain. By making the trust signal **intrinsic and spatially localized**, Co‑Diffusion supports targeted human review ("check these three spans") instead of all‑or‑nothing trust. It also repositions DLM research away from a losing speed race toward a capability — structural verifiability — that autoregressive models cannot replicate, giving the paradigm a durable reason to exist.
+If you want a different flavor than "reasoning mechanism," here are two other directions I scoped and believe are comparatively under‑mined (each could be expanded into a full proposal):
+
+- **Diffusion features for NLP.** In vision, intermediate diffusion activations are state‑of‑the‑art *representations* (DIFT). No one has asked whether a DLM denoiser's multi‑noise‑level, bidirectional activations form a powerful, multi‑granularity representation for retrieval/parsing/classification — i.e. "is a generative DLM secretly the best encoder?" A clean, mostly‑empirical program with a unify‑gen‑and‑embed payoff.
+- **Diffusion‑native architecture.** LLaDA explicitly notes it designed *no* special attention or positional encoding for the diffusion workload (it doesn't even input the noise level). The efficiency papers here (DPad's "scratchpad," d²Cache's "three KV phases") are *evidence* the AR architecture is mismatched to iterative bidirectional refinement. A from‑the‑workload‑up redesign (commitment‑aware positions, mask‑vs‑committed attention routing, time conditioning) is concrete and under‑explored.
+
+Tell me which flavor you want and I'll develop it to the same depth — or push harder on a constraint of your own.
 
 ---
 
 ## References
 
-**Papers in this repository**
-- *Large Language Diffusion Models (LLaDA)* — Nie, Zhu, You, et al., NeurIPS 2025.
-- *Diffusion Language Models Know the Answer Before Decoding (Prophet)* — Li, Zhou, et al., ICLR 2026. https://github.com/pixeli99/Prophet
-- *LangFlow: Continuous Diffusion Rivals Discrete in Language Modeling* — Chen, Liang, Sui, et al. https://github.com/nealchen2003/LangFlow
-- *ELF: Embedded Language Flows* — Hu, Qiu, et al. (MIT). https://github.com/lillian039/ELF
-- *Cola: Continuous Latent Diffusion Language Model* — Guo, Zhao, et al. (ByteDance Seed). https://hongcanguo.github.io/Cola-DLM/
-- *DPad: Efficient Diffusion Language Models with Suffix Dropout* — Chen, Huang, et al. (Duke), ICLR 2026. https://github.com/Crys-Chen/DPad
-- *d²Cache: Accelerating Diffusion‑Based LLMs via Dual Adaptive Caching* — Jiang, Cai, Luo, et al. (SEU), ICLR 2026. https://github.com/Kamichanw/d2Cache
-- *SPG: Sandwiched Policy Gradient for Masked Diffusion Language Models* — Wang, Rashidinejad, et al. (Meta/MIT), ICLR 2026. https://github.com/facebookresearch/SPG
-- *Steering Masked Discrete Diffusion via Discrete Denoising Posterior Prediction (DDPP)* — Rector‑Brooks, Hasan, et al., ICLR 2025.
-- *UniSteer: Text‑Guided Flow Matching in Activation Space for Versatile LLM Steering* — Shi, Zhang, et al. (ShanghaiTech).
+**Papers in this folder that this proposal builds on**
+- *SPG: Sandwiched Policy Gradient for Masked Diffusion Language Models* — the Sudoku/Countdown gaps that motivate the whole idea; estimator reused in §5.2. https://github.com/facebookresearch/SPG
+- *Large Language Diffusion Models (LLaDA)* — bidirectional substrate; reversal‑curse result; "no special architecture" gap (alt‑seed 2).
+- *Diffusion LMs Know the Answer Before Decoding (Prophet)* — globally‑stabilizing canvas belief. https://github.com/pixeli99/Prophet
+- *DPad* (suffix dropout) & *d²Cache* (dual adaptive caching) — efficiency stack that makes inner rounds cheap (§5.4). https://github.com/Crys-Chen/DPad · https://github.com/Kamichanw/d2Cache
 
 **Field context surfaced during the literature sweep**
+- *Where‑to‑Unmask: Ground‑Truth‑Guided Unmasking Order Learning* — https://arxiv.org/abs/2602.09501
+- *Improving Sampling for Masked Diffusion Models via Information Gain* — https://arxiv.org/pdf/2602.18176
+- *Learning Unmasking Policies for Diffusion Language Models* — https://arxiv.org/pdf/2512.09106
+- *Train for the Worst, Plan for the Best: Token Ordering in Masked Diffusions* — https://arxiv.org/html/2502.06768v1
 - *Don't Settle Too Early: Self‑Reflective Remasking (RemeDi)* — https://arxiv.org/abs/2509.23653
-- *Revise, Don't Freeze: Sampler‑Matched Training for Self‑Correcting MDLMs (SCOPE)* — https://arxiv.org/html/2606.01026
-- *Targeted Remasking / Token‑to‑Mask Refinement* — https://arxiv.org/abs/2605.26436 , https://arxiv.org/abs/2604.18738
-- *DynHD: Hallucination Detection for Diffusion LLMs via Denoising Dynamics* — https://arxiv.org/pdf/2603.16459
-- *Optimizing Decoding Paths in Masked Diffusion Models by Quantifying Uncertainty* — https://arxiv.org/pdf/2512.21336
 - *S³: Stratified Scaling Search for Test‑Time in DLMs* — https://arxiv.org/pdf/2604.06260
-- *RFG: Test‑Time Scaling for Diffusion LLM Reasoning with Reward‑Free Guidance* — https://openreview.net/forum?id=Q5YGlns7Bb
-- *Test‑Time Scaling with DLMs via Reward‑Guided Stitching* — https://arxiv.org/abs/2602.22871
-- *Diffuse Thinking: DLMs as Efficient Thought Proposers* — https://arxiv.org/pdf/2510.27469
-- *How Efficient Are Diffusion Language Models, Really?* — https://arxiv.org/html/2510.18480v1
-- *Diffusion Beats Autoregressive in Data‑Constrained Settings* — https://arxiv.org/pdf/2507.15857
-- *Closing the Data‑Efficiency Gap Between AR and Masked Diffusion LLMs* — https://openreview.net/forum?id=J2J2LuXJev
-- *Diffusion‑Inspired Masked Fine‑Tuning for Knowledge Injection* — https://arxiv.org/abs/2510.09885
-- *V1: Unifying Generation and Self‑Verification for Parallel Reasoners* — https://harmandotpy.github.io/v1-verification/
-- *CoVerRL: Generator‑Verifier Co‑Evolution* — https://arxiv.org/pdf/2603.17775
-- *Chain‑of‑Verification Reduces Hallucination* — https://arxiv.org/pdf/2309.11495
-- *Awesome‑DLMs survey* — https://github.com/VILA-Lab/Awesome-DLMs
+- *Reduce, Reuse, Recycle: Compositional Generation with EBM Diffusion + MCMC* — stable corrected discrete updates. https://arxiv.org/abs/2302.11552
+- *Emergence of a DIFT‑style "diffusion features" literature* (vision; alt‑seed 1) — https://arxiv.org/abs/2306.03881
 
 ---
 
-*Prepared after reading all ten DLM papers in this directory and surveying ~30 recent related works. The proposal is intentionally a drop‑in finetune on existing LLaDA/Dream checkpoints and reuses peer‑reviewed estimators (SPG, DDPP) so that the novel claim — structural, co‑generated verifiability — can be tested cheaply and falsified cleanly.*
-
+*Grounded in the ten papers in this directory, especially the unexplained constraint‑problem gap in SPG. Designed as a drop‑in fine‑tune that reuses peer‑reviewed components (SPG's estimator, the d²Cache/DPad efficiency stack) so the novel claim — diffusion as learnable constraint propagation — can be tested cheaply and falsified cleanly via H1.*
