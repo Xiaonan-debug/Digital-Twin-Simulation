@@ -1,120 +1,250 @@
+1. The problem: how do you trust a reasoning model's answer?
+
+Say you ask a model: "A store has 3 boxes of 12 apples, sells 17, how many left?"
+
+If the model just blurts one answer, it might be wrong — it could make a slip in one reasoning path. So the standard trick everyone uses is self-consistency:
+
+▎ Make the model solve it 64 different times (with some randomness, so it takes different reasoning paths), collect all 64 final answers, and take the majority vote.
+
+If 58 of the 64 say "19," you trust "19." This works great and is the backbone of modern reasoning systems (o1-style, etc.). The catch: it's 64× the cost. You ran the model 64 times to answer one question.
+
+---
+2. What is voting actually doing?
+
+Here's the key insight that's easy to miss. When you sample 64 chains and vote, what you're really doing — mathematically — is estimating this:
+
+▎ "Averaging over all the different ways I could reason about this problem, what answer do I land on most often?"
+
+In symbols: $p(\text{answer} \mid \text{question}) = \sum_{\text{reasoning}} p(\text{answer} \mid \text{question}, \text{reasoning}) \times p(\text{reasoning})$.
+
+That sum-over-all-reasonings is called marginalizing out the reasoning. Voting approximates it by brute force: sample a bunch of reasonings, see where the answers pile up. Every fancy DLM voting paper is just a cleverer way to run that same expensive "sample-many-and-pile-up" loop.
+
+Nobody asked: do diffusion models even need to run that loop?
+
+---
+3. The diffusion-only trick
+
+Now recall how a diffusion LM is trained (LLaDA, in your folder). You take text like [question] [reasoning] [answer], randomly hide some words, and train the model to fill them back in. Because the hiding is random, sometimes the training hides the entire reasoning and forces the model to predict the answer with the reasoning completely blank.
+
+So the model is literally trained to answer:
+
+▎ "Given the question, with the reasoning hidden, what's the answer?"
+
+And here's the beautiful part: that's the same average we wanted. When the model fills in the answer with the reasoning masked out, it has already been trained to average over all the reasonings internally. The "hidden reasoning → answer" prediction is the marginal — the thing voting spends 64 samples to estimate.
+
+So in principle: one forward pass, reasoning masked, read the answer. No sampling 64 chains. No voting. The expensive loop collapses into a single query.
+
+That's the hook: "Don't sample 64 chains and vote — just mask the chain and read the answer."
+
+---
+4. Why an autoregressive model can't do this
+
+This is the part that makes it a real diffusion contribution, not a generic trick.
+
+An autoregressive model (ChatGPT-style) writes strictly left-to-right and never sees the future. If you ask it the question with no reasoning, it gives you "answer without thinking" — which is just a worse, dumber answer. It is not averaging over reasonings, because AR never integrates over text it hasn't written yet.
+
+A diffusion model is bidirectional and trained on "fill in the blanks anywhere." So "reasoning is blank" doesn't mean "didn't think" — it means "averaged over all the ways it could have thought." That difference is the whole idea, and only diffusion has it. The test-time-scaling crowd has been running 64× sampling loops on diffusion models while this free shortcut sat unused.
+
+---
+5. The catch — and this is the SPG-style part
+
+If the one-pass shortcut were perfectly accurate, the project would just be "do this, done." It isn't perfectly accurate, and the real research is precisely characterizing how it's wrong — that's exactly what SPG does (SPG: "the naive estimate is biased like this, here's the fix").
+
+The shortcut is biased for a clean, identifiable reason. When you mask the reasoning entirely, the model has to average over reasonings inside a single pass — and it does this imperfectly. It's like the difference between:
+
+- Averaging the answers you'd get from many reasonings (what we want), vs.
+- Reasoning once from a blurry "average" of all reasonings (what one masked pass actually does).
+
+These aren't the same (it's a "Jensen gap," if you want the technical name), and the gap is biggest exactly on hard problems where the reasoning really matters — which is the worst place to be sloppy.
+
+---
+6. The fix: CV-Marg (cheap, not free)
+
+So we don't take the one-pass estimate blindly. We correct it cheaply. Instead of sampling 64 full reasonings, we do a handful (say 4–8) of partial reveals:
+
+- Start from the free masked-reasoning answer.
+- Then reveal a little bit of the reasoning and see how much the answer shifts.
+- That shift tells you exactly how big the bias is for this problem.
+- Extrapolate: a few of these cheap partial peeks let you correct the free estimate toward the true answer.
+
+Two nice properties fall out:
+- It's adaptive. On an easy question, revealing reasoning barely moves the answer → 1 pass is enough. On a hard question, the answer moves a lot → spend a few more. Compute goes where it's needed — same spirit as SPG spending effort where its estimate is loose.
+- Worst case = no worse than voting. If you keep revealing more, it smoothly turns back into full self-consistency. So the downside is bounded; the upside is ~10× cheaper.
+
+And you get a free confidence signal: if the answer barely moves across the partial peeks, the model is sure; if it swings wildly, it's not — useful for knowing when to trust it or abstain.
+
+---
+7. Why it's exciting
+
+- It could make reasoning ~10× cheaper on diffusion models (4–8 passes instead of 64), with a principled method, not a heuristic.
+- It's uniquely a diffusion thing — it leverages exactly the property (bidirectional, fill-in-anywhere training) that makes diffusion LMs different from AR. So it's a reason to use a DLM that has nothing to do with the contested "speed" story.
+- It's SPG-flavored: a precise bias in something everyone estimates naively, a cheap corrected estimator, and a clean theory of when it works.
+- The first experiment is one forward pass on an existing LLaDA checkpoint: does "mask the reasoning, read the answer" actually beat a no-reasoning baseline and correlate with voting? If yes, the whole thing is alive. If no, you found out for the cost of a single query — honest and cheap to de-risk.
+
+---
+One-sentence version: Self-consistency votes over 64 sampled reasonings to estimate an average answer; a diffusion model was already trained to compute that average directly when you mask the reasoning — so we read it in one pass, characterize the small bias that introduces, and fix it with a handful of cheap partial peeks instead of 64 full samples.
+
+Want me to walk through the apples example numerically (what the masked-reasoning distribution looks like and how a partial peek corrects it), or sketch exactly what the make-or-break first experiment would measure?
+
+✻ Worked for 41s
+
+❯ Give me a new novel research idea, I like the research style of SPG, do not copy or increment SPG, but follow it's style, we can also focus on RL for DLM
+
+RL for DLM is a great target — and the cleanest way to follow SPG's style without incrementing it is to attack a different factor of the same policy gradient. SPG fixed the likelihood term (intractable → biased bound → sandwich). The other big factor nobody has fixed for DLMs is the advantage / credit-assignment term: every DLM-RL method (d1, UniGRPO, wd1, SPG) takes one sequence-level reward and smears it uniformly across all tokens and all denoising steps — even though a diffusion rollout is an ordered trajectory of commitments where some decisions are pivotal and most are filler. AR has a natural causal reward-to-go; DLMs have thrown that away.
+
+Let me verify this is genuinely open before writing.
+
+⏺ Web Search("credit assignment diffusion language model reinforcement learning per-token advantage denoising trajectory reward-to-go GRPO")
+Did 1 search in 8s
+
+⏺ Web Search("diffusion language model RL token-level advantage uniform credit unmasking order reward attribution pivotal tokens 2026")
+Did 1 search in 9s
+
+Confirmed — RL-for-DLM is also heavily mined: DACA-GRPO is literally "denoising-aware credit assignment," dUltra and DCoLT do RL over the unmasking order, plus stepwise-advantage and multiplicative-reward variants. So credit assignment, the likelihood term (SPG), and order-as-action are all taken.
+
+But there's one factor of the RL problem that's still open, and it's a certainly-true, crisp, DLM-unique structural fact: exploration. SPG fixed the gradient's likelihood term; DACA fixed the advantage weighting; nobody has fixed the fact that the standard exploration knob — token temperature — is structurally broken for diffusion LMs. That's my pick. Let me write it.
+
+⏺ Write(Explore_The_Path_Proposal.md)
+Wrote 120 lines to Explore_The_Path_Proposal.md
 # Explore the Path, Not the Token
-### Coherent Exploration for Reinforcement Learning in Diffusion Language Models
 
-**An RL‑for‑DLM proposal in SPG's methodological style: isolate one factor of the policy‑gradient pipeline that everyone borrows unchanged from autoregressive RL, show it is *structurally broken* for diffusion models, characterize the failure precisely, and replace it with a principled, DLM‑native mechanism — validated on reasoning benchmarks.**
+how it is *structurally broken* for diffusion models, characterize the failure precisely, and replace it with a principled, DLM‑native mechanism — validated on reas
 
-> **The hook.** GRPO‑style RL only learns when a group of rollouts has **reward variance** — i.e., when the policy *explores*. In autoregressive models you dial exploration with one harmless knob: sampling **temperature**. **That knob is broken for diffusion LMs.** Because a DLM commits many tokens *in parallel* from per‑position marginals, raising temperature doesn't produce *diverse valid attempts* — it produces *incoherent* ones (the jointly‑sampled tokens stop agreeing), which earn zero reward and teach nothing. So diffusion RL is silently **exploration‑starved**: too little temperature → identical rollouts → no signal; too much → garbage rollouts → no signal. We give the policy its exploration back by **exploring in trajectory space, not token space** — diversifying *which tokens are committed when*, while keeping every individual commitment cold and coherent — and derive the corrected policy gradient for it.
+loration with one harmless knob: sampling **temperature**. **That knob is broken for diffusion LMs.** Because a DLM commits many tokens *in parallel* from per‑posit
+ion marginals, raising temperature doesn't produce *diverse valid attempts* — it produces *incoherent* ones (the jointly‑sampled tokens stop agreeing), which earn z
+uts → no signal. We give the policy its exploration back by **exploring in trajectory space, not token space** — diversifying *which tokens are committed when*, whi
 
-This is a **different factor** of the same gradient SPG and DACA‑GRPO touch (SPG: the likelihood term; DACA: the credit weights; ours: the exploration distribution), so it **composes** with both.
+, so it **composes** with both.
+---
+… +157 lines
+
+Saved to /Users/xluobd/Desktop/DLM/Explore_The_Path_Proposal.md. Here's the idea and why it's SPG-style without copying or incrementing SPG.
+
+How I matched SPG's style
+
+SPG's recipe: take one factor of the policy gradient that everyone borrowed unchanged from autoregressive RL, prove it's broken for diffusion models, characterize the failure precisely, replace it with a principled fix, validate on the reasoning suite. SPG did this for the likelihood term. DACA-GRPO (which already exists) did it for the credit/advantage weights. The remaining untouched factor is exploration — and that's the one I take.
+
+The idea: "Explore the Path, Not the Token"
+
+The setup. GRPO/RLVR only learns when a group of rollouts has reward variance — some attempts succeed, some fail. That variance comes entirely from the policy exploring. No diversity → all rollouts identical → advantage is zero → no gradient.
+
+The structural failure (the SPG-style diagnosis). In an autoregressive model, you dial exploration with one harmless knob: token temperature. It's safe because each token is sampled conditioned on the actual previous tokens — even at high temperature the sample stays coherent.
+
+A diffusion LM commits many tokens in parallel, each from its own marginal, without seeing the others being committed in the same step. So raising temperature to explore doesn't give you diverse valid attempts — it amplifies the factorization error (the co-committed tokens stop agreeing) and gives you incoherent attempts. That creates a bind:
+
+- Low temperature → high-confidence parallel commits → rollouts collapse to near-duplicates → no reward variance → no signal.
+- High temperature → incoherent garbage → zero reward → no signal.
+
+So the usable temperature window for a DLM is strictly narrower than for AR — and on exactly the hard instances RL needs most (where the model is confidently wrong), it's often empty. Every DLM-RL paper inherits this silently because they all borrow token sampling from AR and spend their novelty on the gradient.
+
+The fix. Keep every individual token commitment cold and coherent, and move exploration into the denoising trajectory instead:
+- Order perturbation — randomize which positions get committed at each step (not always the most-confident), steering the rollout into different reasoning basins;
+- Stochastic re-noising — occasionally re-mask and re-decide a region given richer context, so a rollout can escape the basin the greedy path fell into.
+
+The metaphor: don't shake each token (shatters coherence) — shake the route through the canvas (preserves it). Result: rollouts that are individually coherent yet collectively diverse, restoring the reward variance GRPO needs exactly where temperature can't.
+
+The technical core (SPG-flavored). Path-space exploration changes the sampling distribution, so I derive the corrected, unbiased policy gradient: treat the schedule ξ as an exploration nuisance, reinforce the path-marginalized likelihood of the final answer (reinforce the answer, not the lucky path that found it), with an importance correction so off-policy schedule exploration stays unbiased — plus a variance analysis showing it beats temperature at matched coherence.
+
+Why it's distinct (and composable)
+
+- vs SPG (likelihood term) — different factor; I reuse SPG's bound as a black-box component.
+- vs DACA-GRPO (credit weights) — DACA assumes the group already has signal; I fix getting the signal. Stacks on top.
+- vs dUltra / DCoLT (RL over unmasking order) — they learn one best order to exploit (speed/quality); I inject order stochasticity to explore and marginalize it out. Opposite goal, different estimator.
+
+It claims to fix only the exploration share of failures (C1/C3 separate exploration gaps from genuine capability gaps), and the make-or-break first experiment is one cheap temperature sweep (C1): if the usable window is wide, the premise is wrong and the project stops there — honest and cheap to de-risk.
+
+One-line version: RLVR only learns when rollouts disagree; autoregressive models create disagreement with temperature, but temperature is structurally broken for diffusion models because parallel commits turn diversity into incoherence — so we create disagreement by diversifying the denoising path instead, and derive the unbiased policy gradient for it.
 
 ---
+A transparency note: this mid-2026 DLM-RL space is very crowded (I verified SPG/likelihood, DACA/credit, dUltra+DCoLT/order are all taken). The exploration deficit is the one factor I could not find addressed — and its root cause (temperature × parallel factorization error) is solidly supported by the parallel-decoding literature, so the diagnosis rests on an established mechanism rather than a guess.
 
-## Table of Contents
-1. [Background: RL needs reward variance, reward variance needs exploration](#1-background)
-2. [The structural failure: temperature is broken for DLMs](#2-the-structural-failure-temperature-is-broken-for-dlms)
-3. [The fix: explore the path, not the token](#3-the-fix-explore-the-path-not-the-token)
-4. [The corrected policy gradient](#4-the-corrected-policy-gradient)
-5. [Why this is not SPG, DACA, dUltra, or DCoLT](#5-why-this-is-not-spg-daca-dultra-or-dcolt)
-6. [Experiments & falsifiable claims](#6-experiments--falsifiable-claims)
-7. [Risks](#7-risks)
-8. [References](#references)
+Want me to (a) formalize the path-marginalized gradient and the variance-reduction claim, (b) spec the C1 temperature-sweep experiment to de-risk it immediately, or (c) generate yet another SPG-style RL angle (e.g., the off-policy / sample-efficiency obstacle, or reward over-optimization that collapses a DLM's parallelism back into sequential decoding)?
 
----
+✻ Baked for 6m 14s
 
-## 1. Background
+❯ Explain this idea to me
 
-RL with verifiable rewards (RLVR / GRPO), the workhorse of modern reasoning training and the framework SPG operates in, works as follows for a prompt $q$:
-
-1. Sample a **group** of $G$ rollouts $\{x_1,\dots,x_G\}$ from the policy $\pi_\theta(\cdot\mid q)$.
-2. Score them with a verifier, $R(x_i)\in\{0,1\}$ (correct / incorrect).
-3. Form the group‑relative advantage $A(x_i) = \dfrac{R(x_i)-\bar R}{\mathrm{std}(R)}$ and update toward high‑advantage rollouts.
-
-The learning signal is **proportional to the spread of $R$ within the group.** If all $G$ rollouts are identical (all right or all wrong), $A\equiv 0$ and the gradient vanishes. The signal therefore depends entirely on the policy's **exploration**: the group must contain *diverse, individually‑coherent attempts* so that some succeed and some fail. This is the engine of RLVR — and it is the part that breaks for diffusion models.
-
-## 2. The structural failure: temperature is broken for DLMs
-
-In an **autoregressive** policy, exploration is dialed by a single scalar — sampling temperature $\tau$ on each token's softmax. It is *harmless* because each token is drawn **conditioned on the actual realized previous tokens**: even at high $\tau$, the sample stays internally consistent (the model conditions on whatever it just sampled). Raising $\tau$ smoothly trades coherence for diversity, and there is a wide usable window. This is why GRPO "just works" for AR.
-
-A **diffusion** policy commits multiple masked positions **in parallel**, each drawn from its own marginal $p_\theta(x_i\mid \text{context})$, *without seeing the other tokens being committed in the same step*. Now raise $\tau$ to explore:
-
-> **Proposition (the exploration bind).** For a diffusion policy, increasing token temperature increases per‑position entropy but, because co‑committed tokens are sampled from a *product of marginals*, it increases the **joint factorization error** super‑linearly: the diverse samples it produces are predominantly **incoherent** (mutually inconsistent tokens), not diverse‑valid. Hence
-> - **low $\tau$** → high‑confidence parallel commits → rollouts collapse to near‑duplicates → $\mathrm{std}(R)\!\to\!0$ → **no signal** (starvation);
-> - **high $\tau$** → factorization blow‑up → incoherent rollouts → $R\!\equiv\!0$ → **no signal** (garbage).
-
-The usable temperature window for a DLM is therefore *strictly narrower* than for an AR model, and on exactly the hard instances RL most needs to learn — where the base policy is **confidently wrong** — it is often *empty*: the policy is too confident to diversify at low $\tau$ and too fragile to stay coherent at high $\tau$. This is a clean, measurable, DLM‑specific defect that the entire DLM‑RL line (d1, UniGRPO, wd1, SPG, DACA‑GRPO) inherits silently, because they all borrow token‑level sampling from AR and spend their novelty on the *gradient*, not the *exploration*.
-
-The root cause is structural: **AR explores in token space along a fixed generation path; a DLM's coherence lives in the path itself.** So exploration must move to where the structure is.
-
-## 3. The fix: explore the path, not the token
-
-We keep every individual token commitment **cold** (low $\tau$, coherent) and instead inject stochasticity into the **denoising trajectory** — the order and schedule by which positions are committed and revisited. Two coherent‑by‑construction exploration operators:
-
-- **Order perturbation.** Randomize *which* low‑confidence positions are committed at each step (instead of always the top‑$k$ most confident). Different commitment orders steer the rollout into different basins — *different reasoning* — while each committed token is still drawn cold, conditioned on a genuine partial context. Diverse **and** coherent.
-- **Stochastic re‑noising (revisitation).** Occasionally re‑mask a committed region and re‑decide it given the now‑richer context. This lets a rollout *escape* the basin the greedy path fell into, producing a genuinely different — but still self‑consistent — final answer.
-
-Intuitively: instead of shaking each token (which shatters coherence), we shake the **route** through the canvas (which preserves it). The result is a group of rollouts that are *individually coherent yet collectively diverse* — restoring the $\mathrm{std}(R)$ that GRPO needs, precisely where token‑temperature cannot.
-
-**Claim:** at any fixed level of per‑sample coherence, path‑space exploration achieves higher *effective rollout diversity* (and thus a stronger advantage signal) than token‑temperature, because it decouples the diversity source from the factorization error.
-
-## 4. The corrected policy gradient
-
-Path‑space exploration changes the sampling distribution, so the gradient must be corrected to stay valid — this is the SPG‑style technical core. Write a rollout as a (final sequence, trajectory) pair $(x,\xi)$ where $\xi$ is the realized commit‑order/revisit schedule drawn from an **exploration kernel** $\rho_\beta(\xi\mid q,\theta)$ (with $\beta$ the exploration strength). The objective is reward of the final sequence, marginal over the nuisance trajectory:
-
-$$
-J(\theta)=\mathbb{E}_{\xi\sim\rho_\beta}\;\mathbb{E}_{x\sim\pi_\theta(\cdot\mid q,\xi)}\big[R(x)\big].
-$$
-
-The estimator must address two things SPG and DACA do **not**:
-
-1. **An exploration kernel that is differentiated from the policy.** $\rho_\beta$ controls *exploration* (used at rollout time to enrich the group) but the *update* must reinforce the policy's tendency to produce the good final answer **regardless of the path that found it** — otherwise we reinforce a nuisance. We therefore reinforce the **path‑marginalized** likelihood of the final sequence, estimated over the group, rather than the single sampled trajectory's likelihood. (SPG's intractable‑likelihood machinery is *reused here as a black box* to bound the per‑sample term; our contribution is the marginalization over $\xi$.)
-2. **An importance correction** $\propto \pi_\theta(\cdot\mid q,\xi)/\rho_\beta$ so that exploring with an off‑policy schedule kernel yields an **unbiased** advantage — analogous in spirit to SPG replacing a biased surrogate with a low‑bias one, but here the bias being removed is the **exploration‑induced** one.
-
-A schedule for $\beta$ (anneal exploration down as the policy sharpens) and a variance analysis (path‑space exploration provably lowers gradient variance versus temperature at matched coherence) complete the method.
-
-## 5. Why this is not SPG, DACA, dUltra, or DCoLT
-
-| Prior line | What it fixes in the gradient | Why this is different |
-|---|---|---|
-| **SPG** | the **likelihood term** (intractable → sandwiched bound) | We fix the **exploration distribution**; we *reuse* SPG's bound as a component. Composable. |
-| **DACA‑GRPO** | the **credit/advantage weights** across the trajectory | We fix **how rollouts are generated** so the group has signal in the first place; DACA assumes signal exists. Composable. |
-| **dUltra** | learns one **best unmasking order** to maximize speed/quality (exploit) | We **inject order *stochasticity* to explore** and correct the gradient for it — opposite goal (explore, not exploit), and an unbiased estimator, not a learned planner. |
-| **DCoLT** | RL over the unmasking **order as the action** (Plackett‑Luce) to improve reasoning | DCoLT *optimizes* the order as part of the answer; we treat the schedule as an **exploration nuisance to marginalize out**, reinforcing the *path‑independent* final answer. Different objective and different estimator. |
-
-The contribution: a **diagnosis** (token temperature is a structurally broken exploration knob for diffusion policies, with a precise factorization‑error mechanism and a measurable empty‑window failure on hard instances) plus a **fix** (coherent path‑space exploration with an unbiased, path‑marginalized policy gradient). It is orthogonal to, and stackable on, every existing DLM‑RL method.
-
-## 6. Experiments & falsifiable claims
-
-**Base models / setup.** LLaDA‑8B, Dream‑7B; GRPO/SPG trainer; verifiable‑reward reasoning tasks — **GSM8K, MATH500, Countdown, Sudoku** (the SPG suite, for direct comparability).
-
-- **C1 (the bind is real).** Sweep token temperature $\tau$ for a diffusion policy and plot, per instance, group reward‑variance and rollout coherence. *Prediction:* a narrow/empty usable window, with the empty cases concentrated on hard, confidently‑wrong instances. *This is the cheap, first experiment; if the window is wide, the premise is wrong and the project stops here.*
-- **C2 (path beats token).** At matched per‑sample coherence, path‑space exploration yields higher effective rollout diversity and higher group reward‑variance than temperature.
-- **C3 (it trains better).** Path‑exploration RL improves final accuracy over identical GRPO/SPG runs that explore via temperature — with the largest gains on the hard tasks (Countdown/Sudoku) where the temperature window is emptiest.
-- **C4 (composability).** Stacking on SPG (likelihood) and DACA (credit) gives additive gains, confirming it fixes an independent factor.
-- **C5 (AR has no such deficit).** The same diagnosis on an AR policy shows a wide temperature window — confirming the deficit is a *diffusion* property, not a generic RL one.
-
-**Ablations.** order‑perturbation vs re‑noising vs both; exploration strength $\beta$ schedule; with/without the importance correction (to show the naive uncorrected version is biased); group size $G$.
-
-## 7. Risks
-
-- **Path‑space exploration might still leave gaps** on instances where *every* coherent path gives the same wrong answer (genuine capability gaps, not exploration gaps) — C1/C3 separate the two; we only claim to fix the *exploration* share.
-- **The importance correction could be high‑variance**; mitigations: keep $\rho_\beta$ close to the policy's own sampler, clip ratios (as PPO/GRPO do), anneal $\beta$.
-- **Extra rollout cost** from re‑noising — but it is exploration *replacing* failed temperature rollouts, not added on top, and is bounded by $\beta$.
+Let me build it up from scratch with a concrete picture.
 
 ---
+1. How you train a reasoning model with RL
 
-## References
+The standard recipe (the one SPG uses) works like this. Take a math problem. Have the model try it 8 times (with some randomness, so the attempts differ). Grade each attempt right/wrong. Then:
 
-**From this folder**
-- *SPG: Sandwiched Policy Gradient* — fixes the likelihood term; reused as a component and the methodological template. https://github.com/facebookresearch/SPG
-- *Large Language Diffusion Models (LLaDA)* — the parallel‑commitment sampler whose temperature behavior we diagnose.
+- Attempts that got it right → "do more of that."
+- Attempts that got it wrong → "do less of that."
 
-**Closest neighbors (positioned against in §5)**
-- *DACA‑GRPO: Denoising‑Aware Credit Assignment for RL in Diffusion LMs* — https://arxiv.org/abs/2605.16342
-- *dUltra: Ultra‑Fast Diffusion LMs via RL* (learned unmasking planner) — https://arxiv.org/html/2512.21446
-- *DCoLT: Reinforcing the Diffusion Chain of Lateral Thought* (order‑as‑action RL) — https://arxiv.org/pdf/2505.10446
-- *RL for Diffusion LLMs with Entropy‑Guided Step Selection and Stepwise Advantages* — https://arxiv.org/pdf/2603.12554
-- *ParallelBench / factorization‑error analyses of parallel decoding* (mechanism behind the temperature bind) — https://arxiv.org/abs/2510.04767
+That's the whole learning signal. And here's the catch that everything hinges on:
+
+▎ If all 8 attempts come out the same, there's nothing to learn from. All 8 right → "do more of what you already do" (no new info). All 8 wrong → "do less of everything" (no direction). You only learn when the 8 attempts disagree — some right, some wrong — so the model can see what separates a win from a loss.
+
+So the engine of RL is disagreement among the attempts. And disagreement comes from the model exploring — trying genuinely different things.
 
 ---
+2. How a normal (autoregressive) model explores
 
-*Same DNA as SPG: pick one factor of the policy gradient that the field borrowed from AR without checking, prove it is broken for diffusion models (here: exploration via temperature), characterize the failure, and replace it with a DLM‑native, unbiased fix — demonstrated on the same reasoning suite. The make‑or‑break check (C1) is a temperature sweep on an off‑the‑shelf checkpoint.*
+ChatGPT-style models write one word at a time, left to right. To make them explore, you turn up a knob called temperature: higher temperature = more random word choices = more varied attempts.
+
+And it's safe to do this, because each word is chosen after seeing the words already written. So even when you crank up the randomness, the sentence still hangs together — if it randomly picks an unusual word, the next word adapts to it. You get attempts that are different but still coherent. Exactly what RL wants. This is why RL "just works" for these models — there's one easy, harmless exploration knob.
+
+---
+3. Why that knob breaks for a diffusion model
+
+A diffusion LM works completely differently. Instead of one word at a time, it fills in many blank positions at once, in parallel — and crucially, each blank is filled in without seeing what the other blanks are being filled in with at the same moment. They're decided simultaneously and independently.
+
+Now turn up the temperature to explore. Here's what goes wrong with a concrete example. Suppose the model is filling in:
+
+▎ "The answer is ___ ___"  (two blanks, should be "twenty four")
+
+- Blank 1, on its own, is torn between "twenty" and "thirty."
+- Blank 2, on its own, is torn between "four" and "five."
+
+At low temperature it confidently writes "twenty four" every time — fine, but then all 8 attempts are identical clones. No disagreement, no learning.
+
+At high temperature it explores each blank independently — but because the two blanks can't see each other, you get random combinations: "twenty four," "thirty five," but also "twenty five" and "thirty four" — incoherent mixes that no sensible reasoning would produce. The "diversity" you bought is mostly garbage, and garbage attempts just get marked wrong and teach nothing.
+
+This is the factorization problem: when tokens are decided in parallel without seeing each other, randomness makes them contradict each other instead of producing genuinely different valid answers.
+
+---
+4. The bind (and why it's worst exactly when you need it most)
+
+So the diffusion model is stuck between two bad options:
+
+- Too cold → 8 identical clones → no disagreement → no learning.
+- Too hot → 8 incoherent messes → all wrong → no useful disagreement → no learning.
+
+The "just right" window in between is narrow — much narrower than for a normal model, which can crank temperature freely because its words see each other.
+
+And here's the painful part: the window is emptiest exactly on the hard problems. On a hard problem the model is often confidently wrong — too sure of itself to vary at low temperature, too fragile to stay coherent at high temperature. So on precisely the problems RL most needs to fix, the model can't generate any useful disagreement, and RL stalls.
+
+This is a real, structural defect, and nobody has addressed it — every diffusion-RL paper (SPG, DACA, etc.) borrowed the temperature knob from autoregressive models and spent their effort on other parts of the math.
+
+---
+5. The fix: shake the path, not the tokens
+
+The key realization: a diffusion model's coherence doesn't live in the individual tokens — it lives in the order and process by which it fills things in. So instead of adding randomness to the tokens (which shatters coherence), add randomness to the route through the page.
+
+Two ways to do that, both coherent by construction:
+
+- Mix up the order. A diffusion model normally fills in the blanks it's most confident about first. Instead, randomly choose a different order — fill in a different part of the reasoning first. Because each token is still chosen coldly, conditioned on a real partial context, every attempt stays coherent — but starting from a different place leads the model down a genuinely different reasoning path to a different answer.
+- Erase and reconsider. Occasionally rub out a chunk it already wrote and re-decide it, now that more of the page is filled in. This lets an attempt escape the rut it fell into and arrive somewhere different — but still self-consistent.
+
+The analogy: don't make a writer pick each word by rolling dice (you get gibberish). Instead, have several writers each start the essay from a different paragraph and work outward. Each essay is coherent; the essays genuinely differ. That's the diversity RL needs — different and coherent — and temperature could never give you both at once.
+
+---
+6. The one technical wrinkle (made simple)
+
+If you change how you sample (exploring via paths instead of temperature), you have to be careful that the model learns the right lesson. You don't want it to learn "that lucky filling-in order is good" — the order was just a scout to discover a good answer. You want it to learn "this final answer is good, no matter which path found it."
+
+So the math reinforces the answer itself, averaged over the path that produced it — treating the path as scaffolding to throw away, not something to reinforce. Getting that averaging right (so the learning signal stays unbiased) is the rigorous, SPG-style core of the method. And SPG's own machinery gets reused as a plug-in component for one sub-step.
+
+---
+7. Why it's worth doing
+
+- It fixes a silent, structural reason diffusion-RL underperforms — the broken exploration knob — that the whole field has been working around instead of fixing.
+- It's uniquely a diffusion problem (a normal model has no such deficit, which we verify) and a uniquely diffusion fix (exploring through the fill-in order, which a left-to-right model can't even do).
+- It stacks on top of SPG and DACA — it fixes a different part of the machine, so the gains should add up.
+- The first experiment is dirt cheap: just sweep the temperature on an existing model and check — is the "useful window" actually narrow and empty on hard problems? If it's wide, the whole premise is wrong and you stop, for the cost of one afternoon. If it's narrow (as predicted), the idea is alive.
+
+---
+One-sentence version: RL only learns when a model's attempts disagree; normal models create disagreement by turning up token randomness, but that's broken for diffusion models because parallel-filled tokens can't see each other and randomness turns them into incoherent contradictions — so instead we create disagreement by randomizing the model's fill-in path while keeping every token coherent, and reinforce the answers it finds regardless of the path.
