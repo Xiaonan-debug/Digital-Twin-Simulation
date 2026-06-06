@@ -1,168 +1,154 @@
-# PRISM — Meaning Lives in the Slow Modes
-### The generation schedule is *already* spectral. We just pointed it at the wrong modes.
+# Flow to a Meaning, Not to the Mean
+### Continuous language generation fails because its target is an *average*. We make it commit to one meaning — semantic first, lexical last.
 
-**A new‑paradigm proposal in ELF's spirit — continuous space, one clean idea, falsifiable on a small model. ELF taught us: stay in continuous space, discretize only at the end. The essay taught us: a DLM must learn `meaning → structure → text`, and above all *where* meaning becomes text. The move no one makes: stop hand‑designing a generation *schedule* at all. Every continuous diffusion model already has one — its own *spectral bias* resolves high‑variance directions first — and in embedding space that order is surface‑first. So don't add machinery. Re‑tune the space so its variance spectrum *is* the semantic spectrum, and the schedule `meaning → structure → text` falls out of physics you already have.**
+**A new‑paradigm proposal that surpasses ELF in ELF's own frame. ELF's thesis was "continuous DLMs were held back by a *habit*, not a limitation" — the habit being per‑step token anchoring, which it removed. We name the *deeper* habit ELF kept: the flow is trained by MSE, so its target is the **conditional mean** of all destinations. For images the mean is a benign blur; for language the mean of two meanings is a *non‑meaning*. The flow spends its whole early budget aiming at a point between "the cat sat" and "a dog ran" — a place no sentence lives. We replace the mean target with a **decisive, mode‑committing target** whose commitment is *scheduled* — meaning's mode locks first, words last — turning the velocity field from an averager into a generator of `meaning → structure → text`.**
 
-> **The observation that decides everything.** A recent result makes diffusion's generation order exact, not folklore: a mode with data‑covariance eigenvalue $\lambda_k$ emerges with timescale $\tau_k \propto \lambda_k^{-1}$ — **high‑variance modes are generated first** (Wang et al., *Spectral Bias in Diffusion*, 2026). For **image pixels** the top‑variance modes happen to be coarse global structure, so denoising is meaning‑/structure‑first *for free* — the reason image diffusion "just works." For **language embeddings** (ELF's space) the top‑variance modes are *token identity and surface frequency*. So the very same physics generates **surface‑first**: exactly the `noise → tokens` failure the essay names. **The schedule was never missing. It was misaligned.**
-
-**The thesis.** The essay asks for two things: a *structured generation space* (结构化生成空间) and a *semantic generation schedule* (语义化生成调度). PRISM gets both from one act. We learn a latent space whose **principal axes of variance are the axes of meaning** — concretely, a space where *variance between different meanings* is packed into a few top modes and *variance from paraphrase / surface choice* is pushed into many small modes. Then we run plain ELF‑style Flow Matching, unchanged. Because $\tau_k \propto \lambda_k^{-1}$, the now‑high‑variance **semantic** modes resolve first and the low‑variance **lexical** modes resolve last. The schedule is not engineered; it is *induced* by the geometry. And the essay's hardest question — *where* meaning becomes text — gets a measurable answer: **the elbow in the variance spectrum**, the band edge where modes stop being paraphrase‑invariant and start being surface‑specific.
-
-> A prism doesn't add light. It reveals the order that was always inside the beam. PRISM doesn't add a schedule. It reveals — and re‑tunes — the spectral order already inside the flow.
+> **The one‑sentence diagnosis.** Flow matching learns $v_\theta(z,t)\!\approx\!\mathbb E[\,e(x)-\varepsilon \mid z_t=z\,]$ — a **conditional expectation**. Expectation over a *unimodal‑ish* image posterior is a slightly blurry image, still on the manifold. Expectation over a *wildly multimodal* language posterior is the **centroid of unrelated sentences**, which is off the manifold of meaning. Continuous DLMs have been flowing toward centroids of meaning this whole time. That is why a half‑finished continuous DLM state is mush, and why the field needed a hard token read‑out bolted onto the end. **The target, not the space and not the corruption, is the bug.**
 
 ---
 
 ## Table of Contents
-1. [The unexamined fact: diffusion already has a schedule](#1-the-unexamined-fact-diffusion-already-has-a-schedule)
-2. [Why it's right for images and wrong for language](#2-why-its-right-for-images-and-wrong-for-language)
-3. [The reframing: align the variance spectrum with the meaning spectrum](#3-the-reframing)
-4. [The method: PRISM](#4-the-method-prism)
-5. [Where meaning becomes text, made measurable](#5-where-meaning-becomes-text-made-measurable)
-6. [Why this is a new paradigm, not ELF/LangFlow/Cola + X](#6-why-this-is-a-new-paradigm)
+1. [The habit ELF kept](#1-the-habit-elf-kept)
+2. [Why the mean is benign for images and fatal for language](#2-why-the-mean-is-benign-for-images-and-fatal-for-language)
+3. [What we actually want: the mode, committed in semantic order](#3-what-we-actually-want)
+4. [The method: Decisive Flows](#4-the-method-decisive-flows)
+5. [The central challenge, stated honestly](#5-the-central-challenge-stated-honestly)
+6. [Why this is a new paradigm, not ELF + X](#6-why-this-is-a-new-paradigm)
 7. [Experiments & falsifiable claims](#7-experiments--falsifiable-claims)
 8. [Risks](#8-risks)
 9. [References](#references)
 
 ---
 
-## 1. The unexamined fact: diffusion already has a schedule
+## 1. The habit ELF kept
 
-A diffusion / flow model has a forward corruption $q(z_t\mid z_0)$ and a reverse generator $p_\theta$. The field pours innovation into the reverse half and the *space*; the folder's own *Semantic Corruption Flows* proposal pours it into learning the forward half. **Both treat the generation schedule — the order in which information appears — as something you must add.** It is not. It is already there, and it is a *spectrum*.
+A continuous DLM has three design choices, not one:
 
-Decompose the data in the eigenbasis of its covariance $\Sigma=\mathrm{Cov}(z_0)=\sum_k \lambda_k\, e_k e_k^\top$. A linear‑denoiser analysis — and, empirically, deep ones — gives a clean law for *when* each coordinate $\langle z_0, e_k\rangle$ is fixed along the reverse trajectory:
+| Choice | Image diffusion convention | ELF | LangFlow | **left unexamined by all** |
+|---|---|---|---|---|
+| the **space** | pixels / VAE latent | learned embedding | embedding | — |
+| the **forward** corruption | Gaussian | Gaussian | Gaussian (+ learned *scalar* schedule) | — |
+| the **regression target** | conditional **mean** velocity (MSE) | conditional **mean** (MSE) | conditional mean (Bregman/CE) | **← this one** |
 
-$$
-\boxed{\;\tau_k \;\propto\; \lambda_k^{-1}\;}\qquad\text{(emergence time of mode }k\text{)}
-$$
+ELF's contribution was to stop forcing the model to round to a token at every step ("the habit"), giving the flow "maximal flexibility." LangFlow's was a learnable scalar noise schedule and self‑conditioning. **Neither touched what the velocity field is *regressed toward*.** And that target is, by the definition of the flow‑matching loss, a **conditional expectation** — an average over every clean destination consistent with the current noisy state.
 
-High‑variance modes ($\lambda_k$ large) are settled **early**; low‑variance modes are settled **late**. This is the *spectral bias / spectral‑law ordering of mode convergence* (Wang et al., 2026; see also analyses of diffusion learning dynamics). It is not a knob. It is what diffusion *does*. **Every continuous DLM in this folder — ELF, LangFlow, Cola — inherits this schedule whether it knows it or not.** The only freedom is: *which directions in the latent get the large $\lambda_k$?* That single choice silently decides what the model generates first.
+For a continuous, near‑unimodal modality this is exactly right; it is the whole reason diffusion works. For language it is the quiet catastrophe, because the set of destinations consistent with a high‑noise embedding is not a tight cluster — it is *every sentence in the language*, and their average is a vector that decodes to nothing.
 
-## 2. Why it's right for images and wrong for language
+## 2. Why the mean is benign for images and fatal for language
 
-The eigenmodes $e_k$ are properties of the **space**, and the spectrum $\lambda_k$ is a property of the **data in that space**. The schedule $\tau_k\propto\lambda_k^{-1}$ is therefore only as good as the alignment between "high variance" and "what should be decided first."
+Take a noisy state $z_t$ at high $t$ (mostly noise). The flow‑matching target is built from the **posterior over clean data** $p(x\mid z_t)$.
 
-| | top‑variance modes $e_{k}$ (large $\lambda_k$) are… | so the *free* schedule generates… | half‑finished state is… |
-|---|---|---|---|
-| **Image, pixel space** | low spatial frequency: coarse global structure | structure → detail, *for free* | a blurry but **coherent** image |
-| **Language, ELF embedding space** | token identity, frequency, position: **surface** | **surface → meaning** (backwards!) | a fluent‑looking but **meaning‑less** draft |
-| **Language, PRISM space (ours)** | **between‑meaning** variation: intent, topic, relations | **meaning → structure → text** | a coherent **gist / outline** |
+- **Images.** $p(x\mid z_t)$ at high $t$ is broad but *locally connected*: the consistent images are blurry variations of one another. Their mean is a **blurry but valid image** — on the manifold, coarse‑to‑fine for free. Averaging = low‑pass filtering = the coarse‑structure‑first schedule image diffusion gets gratis.
+- **Language.** $p(x\mid z_t)$ at high $t$ is **multimodal across *meanings*** — "the cat sat on the mat," "stocks fell sharply," "je t'aime" are all roughly equally consistent with near‑pure noise. Their embedding‑space average is the centroid of unrelated meanings: **off‑manifold, decodes to nothing.** Averaging here is not low‑pass filtering; it is *destroying* the very semantic decision the essay says must be made first.
 
-Image diffusion's "magic" was never the Gaussian and never a clever schedule. It was a lucky coordinate system: pixel variance is dominated by coarse structure, so $\tau_k\propto\lambda_k^{-1}$ *happens* to mean coarse‑first. Language hands us the opposite coordinates. In token‑embedding space the dominant variance is *which tokens appear* — surface. So ELF's own spectral bias drives it to commit surface statistics first and backfill meaning, the precise inversion the essay diagnoses as `noise → tokens`. **The bug is not the schedule and not the denoiser. It is that, in language, variance ≠ significance.** Fix the coordinates and the schedule fixes itself.
-
-## 3. The reframing
-
-The essay's uncertainty decomposition $u(x)=u_{\text{sem}}(x)+u_{\text{lex}}(x)$ becomes, in this lens, a statement about *where the variance lives*. Use the law of total covariance over a meaning variable $c$ (a content/intent) and its surface realizations $x\sim p(x\mid c)$:
+Decompose the destination embedding into a **semantic** part and a **lexical** part, $e(x)=e_{\text{sem}}\oplus e_{\text{lex}}$ (semantic = a frozen sentence/structure encoder's subspace; lexical = the surface residual). The posterior spread splits the same way:
 
 $$
-\Sigma \;=\; \underbrace{\mathrm{Cov}_c\big[\mathbb{E}[z\mid c]\big]}_{\textstyle \Sigma_{\text{between}}\;=\;\text{meaning } (u_{\text{sem}})}
-\;+\; \underbrace{\mathbb{E}_c\big[\mathrm{Cov}[z\mid c]\big]}_{\textstyle \Sigma_{\text{within}}\;=\;\text{surface } (u_{\text{lex}})}.
+\underbrace{\operatorname{Var}[\,e_{\text{sem}}\mid z_t\,]}_{u_{\text{sem}}(z_t)} \;+\; \underbrace{\operatorname{Var}[\,e_{\text{lex}}\mid z_t\,]}_{u_{\text{lex}}(z_t)} .
 $$
 
-$\Sigma_{\text{between}}$ is variation *across meanings* (paraphrases share it); $\Sigma_{\text{within}}$ is variation *across paraphrases of one meaning* (pure surface). The essay's ideal — **resolve $u_{\text{sem}}$ before $u_{\text{lex}}$** — is, given $\tau_k\propto\lambda_k^{-1}$, *exactly* the geometric condition:
+This is **exactly the essay's $u=u_{\text{sem}}+u_{\text{lex}}$.** The pathology, stated precisely:
+
+> At high $t$, $u_{\text{sem}}\!\gg\!u_{\text{lex}}$ — most of the posterior spread is *across meanings*. The MSE target averages over that spread, so the early flow's velocity is dominated by **semantic averaging**: it pulls toward the mean of all meanings instead of *choosing* one. The essay says resolve $u_{\text{sem}}$ **first**; the mean‑velocity flow resolves it **never** — it dilutes it into a centroid and hopes the terminal read‑out invents a word. That terminal read‑out (ELF's shared‑weight snap at $t\!=\!1$) is a *symptom*: you only need a hard de‑blurring step at the end if the flow spent the whole trajectory aiming between meanings.
+
+This reframes the "stop‑halfway = garbled string" diagnostic mechanistically: the halfway state is garbled **because it is a literal average of incompatible sentences**, not because the space or the corruption is wrong.
+
+## 3. What we actually want
+
+Not the mean of the posterior — **a mode**, committed in the right order:
+
+1. **Mode, not mean.** The velocity should point at *one* consistent destination, not the centroid of all of them. (A blurry valid sentence is impossible; a *committed* one is the only kind that exists.)
+2. **Commit semantics before lexis.** *Which* meaning is decided at high $t$ (low information, cheap, paraphrase‑invariant); *which words* render it is decided at low $t$. So the commitment is a **schedule over subspaces**, not a single event.
+3. **Decoupled clocks (the essay's headline).** The **noise schedule** (how much $\varepsilon$ remains, indexed by $t$) and the **commitment schedule** (how sharply the flow has chosen a mode, per subspace) are *different objects*. At one noise level the flow can be fully committed in meaning and fully uncommitted in wording. *Noise schedule ≠ generation schedule*, made literal.
+
+A model that does (1)–(3) generates `pick a meaning → arrange it → spell it`, and every halfway state is a **coherent committed gist**, not an average — the stop‑halfway diagnostic satisfied by construction, with **no terminal read‑out crutch**.
+
+## 4. The method: Decisive Flows
+
+Keep ELF's space and Gaussian forward (we are not re‑litigating those — that's [PRISM]/[Semantic Corruption Flows] territory). Change **only the target and its schedule.** Three components.
+
+**(a) Space (ELF‑minimal).** $z_1=e(x)$ in a learned embedding space; $z_0=\varepsilon\sim\mathcal N(0,I)$; straight interpolant $z_t=(1-t)\varepsilon+t\,e(x)$. A frozen semantic encoder defines an orthogonal split $P_{\text{sem}},P_{\text{lex}}$ of that space (sentence‑embedding directions vs residual).
+
+**(b) A mode‑committing target via responsibilities (the core).** Standard flow matching regresses to $\mathbb E[e-\varepsilon\mid z_t]$. We instead regress to a **responsibility‑weighted target that is driven toward a single mode**. Given $z_t$ and a set of candidate destinations $\{c_k\}$ — minibatch targets, or a learned **meaning codebook** of prototypes — define responsibilities and the target
 
 $$
-\boxed{\;\text{top eigenmodes of }\Sigma \;=\; \text{range of }\Sigma_{\text{between}};\qquad \Sigma_{\text{within}}\ \text{confined to the small‑}\lambda\ \text{tail.}\;}
+r_k(z_t;\beta_t,\,M_t)=\frac{\exp\!\big(-\beta_t\,\lVert M_t(z_t-c_k)\rVert^2\big)}{\sum_j \exp\!\big(-\beta_t\,\lVert M_t(z_t-c_j)\rVert^2\big)},
+\qquad
+\tilde u_t(z_t)=\sum_k r_k\,(c_k-\varepsilon).
 $$
 
-In words: **make meaning the high‑variance directions and surface the low‑variance directions.** Do that, and diffusion's own physics generates meaning first — no learned corruption operator, no new sampler, no schedule network. This is the whole idea. It is a *generative* cousin of Fisher's between/within decomposition (LDA), but where LDA seeks a discriminative projection, PRISM seeks a **generative latent whose variance spectrum doubles as a semantic significance spectrum**, so that the *order of generation* — not a classifier boundary — is what gets organized.
+- $\beta_t$ is an **inverse temperature**: $\beta_t\!\to\!0$ recovers the soft average (≈ELF's mean); $\beta_t\!\to\!\infty$ gives a **hard mode** (argmax destination). We *anneal $\beta_t$ up as the flow proceeds*, so the flow **decides**.
+- $M_t$ is a **subspace mask that schedules *what kind* of mode is committed when.** Early ($t$ small in the reverse): $M_t=P_{\text{sem}}$ — responsibilities are computed in the *semantic* subspace, so the flow commits to a **meaning cluster** while staying agnostic about words. Late: $M_t\!\to\!I$ — responsibilities sharpen in the full space, committing **words**. This is $u_{\text{sem}}$‑before‑$u_{\text{lex}}$ written directly into the loss.
 
-## 4. The method: PRISM
+Train $v_\theta$ with $\mathbb E_t\,\lVert v_\theta(z_t,t)-\tilde u_t(z_t)\rVert^2$. When $\beta_t\!=\!0,M_t\!=\!I$ this **is** ELF — Decisive Flows contains ELF as its no‑commitment limit, so the downside is bounded and the ablation is one knob.
 
-Three components. The reverse generator is deliberately ELF‑plain; the novelty is entirely in *shaping the spectrum of the space*, and in proving the schedule that results is semantic.
+**(c) Two clocks, explicitly.** The noise level $t$ and the commitment pair $(\beta_t,M_t)$ are separate schedules. The contribution is not "add a temperature" — it is the claim that **the commitment schedule should be semantic‑first and is a first‑class design axis the field has been holding fixed at $\beta\!=\!0$.** We learn $(\beta_t,M_t)$ under a meaning‑first prior (semantic commitment time < lexical commitment time), the way LangFlow learned the *noise* schedule — but here the schedule governs *which uncertainty is resolved*, which is the essay's actual subject.
 
-**(a) Continuous space (ELF's lesson, kept minimal).** Encoder $\phi:\mathcal X\to\mathcal Z$, decoder $\psi:\mathcal Z\to\mathcal X$. $z_0=\phi(x)$; tokens read out by $\psi$ at $t\to0$. We add *no* discretization until the end.
+**What this buys.** The flow never aims at a centroid of meanings: at every step it is pointed at one chosen destination, coarsely (a meaning) then finely (a sentence). The terminal hard read‑out becomes unnecessary because the trajectory was decisive all along — decoding $z_t$ at any $t$ yields **a real, progressively‑specified sentence**: topic → gist → draft → text.
 
-**(b) Spectral shaping of $\phi$ — the heart.** A *meaning signal* groups surface variants: paraphrase pairs from back‑translation / dropout‑augmentation, or soft grouping by a frozen sentence encoder $s(\cdot)$ (used only to *define* "same meaning," never decoded from). We train $\phi,\psi$ so that the latent covariance is **spectrally sorted by meaning**:
+## 5. The central challenge, stated honestly
 
-$$
-\mathcal L \;=\; \underbrace{\mathcal L_{\text{recon}}(\phi,\psi)}_{z_0\text{ still encodes all of }x}
-\;+\;\lambda_1\underbrace{\mathcal L_{\text{between}\uparrow}}_{\text{pack meaning into few high-}\lambda\text{ modes}}
-\;+\;\lambda_2\underbrace{\mathcal L_{\text{within}\downarrow}}_{\text{push surface into the low-}\lambda\text{ tail}}
-\;+\;\lambda_3\underbrace{\mathcal L_{\text{order}}}_{\text{nested: significance monotone in }k}.
-$$
+The hard, *interesting* part — the reason this is a research program, not a temperature knob — is **committing without collapsing.** A naively sharpened target invites two failure modes, and handling them is the work:
 
-- $\mathcal L_{\text{between}\uparrow}$: maximize variance of $\mathbb E[z\mid c]$ along the **top‑$K$** axes — paraphrases of *different* contents must spread out there. Meaning becomes low‑dimensional and high‑variance.
-- $\mathcal L_{\text{within}\downarrow}$: minimize paraphrase variance in the top‑$K$ axes (same meaning ⇒ same top‑$K$ coordinates) and let it live only in the small‑$\lambda$ tail. Surface becomes high‑dimensional and low‑variance.
-- $\mathcal L_{\text{order}}$: a *nested* / sequential‑subspace constraint (à la nested dropout) so that significance is **monotone in $k$** — there is a single ordered spectrum, not an unordered split. This is what makes the schedule a smooth `meaning → structure → text`, and what makes the band edge well‑defined.
+- **Mode collapse / mean‑seeking tension.** Anneal $\beta_t$ too fast and the flow locks onto a single global mode (low diversity); too slow and you recover the averaging blur. The defense is the *subspace schedule*: commit in the **low‑dimensional semantic** subspace first (few, well‑separated meaning modes → safe to commit early) and only later in the high‑dimensional lexical residual (commit late, gently). Diversity comes from *which* meaning mode is entered (set by the prior / early stochasticity), not from indecision.
+- **Defining "semantic" without circularity.** $P_{\text{sem}}$ is grounded *externally* by a frozen encoder, so the model cannot define meaning to suit itself — exactly as the essay demands we learn *where* meaning becomes text rather than asserting it. Sensitivity to this choice is an explicit ablation.
+- **The codebook vs. minibatch choice.** Responsibilities over a learned meaning codebook give a clean, reusable set of modes but risk under‑coverage; minibatch responsibilities are coverage‑complete but noisy. Which to use, and whether the codebook should be *generated first by an inner fast flow*, is an open sub‑question (and a clean place for follow‑up, not a dependency).
 
-Crucially, this **does not learn a forward operator** and cannot collapse to a degenerate corruption (the failure mode the folder's SCF proposal must defend against): the forward process stays a fixed, simple Flow‑Matching path. We only re‑sort the coordinates of $\mathcal Z$. The fixed points are pinned by an *externally defined* equivalence (paraphrase = same meaning), so "semantic" is grounded, not circular.
-
-**(c) Plain Flow Matching, unchanged (ELF).** Train the reverse velocity $v_\theta$ with standard conditional Flow Matching in $\mathcal Z$. *Nothing about the sampler is modified.* The meaning‑first schedule is now a free consequence of $\tau_k\propto\lambda_k^{-1}$ acting on a spectrum we engineered.
-
-**(d) Optional amplifier — a *spectral* schedule.** Free spectral bias gives the *ordering*; if we want to *sharpen* the separation (lock meaning hard before surface unfreezes), give each mode its own noise rate $\sigma_k(t)$ tied to its band — a **per‑mode schedule** that generalizes LangFlow's single *scalar* learnable schedule to a *spectrum* of schedules, now derived from $\lambda_k$ rather than hand‑learned. This is strictly optional: the minimal, most beautiful PRISM is geometry + untouched physics.
-
-```text
-PRISM, end to end
-  encode:     z0 = φ(x)                      # latent whose top modes = meaning
-  (train φ,ψ so Cov(z0) is spectrally sorted: between-meaning ↑ top, within-meaning ↓ tail)
-  generate:   z1 ~ prior;  integrate dz/dt = v_θ(z,t)   # plain Flow Matching, no schedule tricks
-              └─ spectral bias τ_k ∝ 1/λ_k  ⇒  top (semantic) modes fix first, tail (lexical) last
-  read out:   x = ψ(z0)                      # discretize only at t→0
-  diagnostic: stop at t>0 ⇒ only top modes resolved ⇒ ψ(z_t) = a coherent GIST
-```
-
-## 5. Where meaning becomes text, made measurable
-
-The essay's deepest, least‑answered demand — *"它首先应学习意义在哪里能够变成文本"* (first learn **where** meaning can become text) — becomes a number. Plot the per‑mode **between‑meaning fraction** $\rho_k=\dfrac{e_k^\top\Sigma_{\text{between}}e_k}{e_k^\top\Sigma e_k}$ against $k$. PRISM predicts a sigmoid with a sharp **elbow $K^\star$**:
-
-- modes $k\le K^\star$: $\rho_k\approx 1$ — **paraphrase‑invariant, semantic** (the meaning band; emerges first);
-- modes $k> K^\star$: $\rho_k\approx 0$ — **surface‑specific, lexical** (the form band; emerges last).
-
-$K^\star$ — the band edge — **is** "where meaning becomes text," reported as a discovered property of language rather than a hyperparameter. The essay's `meaning → structure → text` predicts not one elbow but a *three‑band* spectrum: a top band (intent/topic), a middle band (discourse/syntactic skeleton — "structure"), a high band (exact words). We test for exactly this banding (C2). And the "stop‑halfway" diagnostic is true *by construction*: halting the flow at $t>0$ leaves only the top band resolved, so $\psi(z_t)$ decodes a coherent coarser text — a gist, then an outline, then a draft — as $t\to0$.
+Whether a scheduled, mode‑committing target can realize "decide meaning first, words last" for natural language is precisely the essay's open question — and C1 tests it cheaply, before any scaling.
 
 ## 6. Why this is a new paradigm
 
-| | ELF | LangFlow | Cola | *Semantic Corruption Flows* (this folder) | **PRISM** |
+| | ELF | LangFlow | OT‑/multisample Flow Matching | Simplex / discrete DLMs | **Decisive Flows** |
 |---|---|---|---|---|---|
-| Generation **space** | raw embedding | embedding | compressed VAE latent | ELF‑like | **embedding re‑tuned so variance‑axes = meaning‑axes** |
-| **Schedule** comes from | implicit spectral bias (ignored) | a learned **scalar** noise schedule | implicit, in latent | a **learned forward operator** | **implicit spectral bias on an engineered spectrum** |
-| What is **learned** | reverse + space | reverse + scalar schedule | reverse + VAE | reverse + forward corruption | **reverse + the *eigenbasis of meaning*** |
-| Meaning‑first? | no — surface‑first | no — one global clock | partial (compression/block‑causal) | by an added operator | **yes — from physics, once coordinates are right** |
-| "Where meaning becomes text" | — | — | implicit in bottleneck | a trained trajectory | **a measured spectral band edge $K^\star$** |
-| Forward process | fixed Gaussian | fixed Gaussian + scalar sched. | fixed Gaussian | **replaced by learned operator** | **untouched** |
+| What's changed | removed per‑step CE anchoring | learned **scalar** noise schedule + self‑cond. | better noise↔data **coupling** (lower transport cost) | model categorical posterior directly | **the regression *target*: mean → scheduled mode** |
+| Velocity target | conditional **mean** | conditional mean (Bregman) | conditional mean (straighter paths) | n/a (categorical) | **responsibility‑weighted *mode*, annealed** |
+| Resolves $u_{\text{sem}}$ before $u_{\text{lex}}$? | no | no | no | no (per‑token, order‑agnostic) | **yes — by the subspace schedule $M_t$** |
+| Halfway state | centroid of meanings (mush) | mush | mush | sentence with holes | **a committed coarse meaning (real text)** |
+| Needs terminal hard read‑out? | yes (signature move) | yes | yes | n/a | **no — decisive throughout** |
 
-The contrast that matters most is with the folder's own essay‑driven proposal. *Semantic Corruption Flows* answers the essay by **learning the forward corruption** so meaning dissolves gist‑last — powerful, but it must fight operator collapse and add probe/fluency losses to keep the corruption honest. **PRISM answers the opposite way: leave the physics alone and move the coordinates.** It exploits a *law the field just discovered* (spectral bias) instead of building machinery to imitate that law. No operator to collapse; the only learned object is an *orthonormal basis sorted by an externally grounded notion of meaning*. It is the **structured generation space** half of the essay's prescription (结构化生成空间), executed so completely that the **semantic schedule** half comes for free. It is not ELF+X, not LangFlow+X, not Cola+X: it is the claim that *the generation schedule was always a property of the space's spectrum*, and language simply had the wrong spectrum.
+This is **not ELF + a trick.** ELF's whole story is "remove the habit that cripples continuous DLMs." We show the habit it removed was the *second* one; the *first* — regressing to the mean of a multimodal language posterior — is still there, and is the one the essay's diagnostics actually indict. Removing it changes the object the flow optimizes, not the space (PRISM's axis), not the corruption (Semantic Corruption Flows' axis), and not the sampler. And it is the opposite move from OT‑CFM: OT‑CFM keeps the mean target and makes the *paths* straighter to reach it faster; we keep the paths and change the *target* so the destination is a meaning rather than an average. The two are orthogonal and composable, which is itself evidence they are different axes.
 
-> **The one‑sentence thesis:** *meaning is the slow mode* — and once you make meaning the high‑variance direction, diffusion's own spectral bias generates it first.
+It also pays a conceptual debt: LangFlow reported that self‑conditioning helps continuous DLMs "with effects substantially different from discrete diffusion" and could not say why. Our frame **explains it** — self‑conditioning is a weak, accidental symmetry‑breaker that nudges the flow off the centroid toward a mode. Decisive Flows makes that deliberate, semantic, and scheduled.
 
 ## 7. Experiments & falsifiable claims
 
-**Setup (ELF protocol).** Small scale first (≈105–170M), OWT / LM1B; report Gen‑PPL and few‑step efficiency; then planning‑heavy and controllable tasks. Meaning signal from back‑translation + a frozen sentence encoder for grouping.
+**Setup (ELF protocol).** Small scale first (105–170M), OWT/LM1B; report Gen‑PPL and step‑efficiency; then summarization/MT (ELF's own downstream) and planning‑heavy tasks where meaning‑order matters.
 
-- **C1 — the spectrum is semantic (make‑or‑break, frozen‑model cheap).** After spectral shaping, plot $\rho_k$ vs $k$. **Claim:** a clear monotone elbow $K^\star$ — top modes paraphrase‑invariant, tail modes surface‑specific. *And* truncate $z_0$ to its top‑$K$ modes and decode: meaning must be preserved while wording degrades gracefully as $K\downarrow$ (full sentence → summary → headline → topic). *If $\rho_k$ is flat (no semantic ordering) or truncation destroys meaning before surface, the paradigm fails — and this runs on the encoder alone, before any flow training.*
-- **C2 — three‑band structure.** The spectrum shows the essay's `meaning → structure → text` as *bands*: a top band predicting intent/topic, a middle band predicting discourse/syntactic skeleton, a high band predicting exact tokens. Probes recover this banding; ELF's raw‑embedding spectrum does not.
-- **C3 — it generates meaning‑first (the payoff).** During *unmodified* Flow‑Matching sampling, the top‑band coordinates of $z_t$ stabilize early and the tail late (measure per‑mode settling time; compare to $\tau_k\propto\lambda_k^{-1}$). For ELF the order is reversed (surface settles first). Intervening on early states changes meaning paraphrase‑robustly; intervening late changes only wording.
-- **C4 — efficiency (ELF's currency).** Because the few high‑variance semantic decisions are made first and the many low‑variance lexical modes need little refinement, target Gen‑PPL is reached in **fewer flow steps** than ELF/LangFlow at equal size — few‑step generation should *improve*, since coarse‑first is what few‑step sampling rewards.
-- **C5 — it wins where meaning‑order matters.** Largest gains on long‑form coherence, outline‑faithful and length‑controlled generation, and infilling/planning — the regime the essay predicts, and where surface‑first generation hurts most.
+- **C1 — the pathology is real and is semantic (make‑or‑break, runs on a *frozen* ELF, no training).** Sample states $z_t$ along ELF trajectories; estimate the posterior spread by collecting minibatch destinations near each state and measuring $u_{\text{sem}}(z_t)$ vs $u_{\text{lex}}(z_t)$. **Prediction:** at high $t$, $u_{\text{sem}}\!\gg\!u_{\text{lex}}$, and ELF's learned velocity sits near the *centroid* of multiple meaning clusters (high angular error to every individual mode). *If the posterior is not semantically multimodal, or ELF already tracks a single mode, the diagnosis is wrong and the paradigm dies cheaply.*
+- **C2 — committing fixes it.** A controlled toy: 2 meanings × 3 paraphrases each. ELF's flow lands between the two meaning clusters (decodes to neither); Decisive Flows enters one cluster early (semantic commitment) and one paraphrase late (lexical). Quantify "between‑meaning" residence time.
+- **C3 — the schedule is semantic‑first.** Probing $z_t$ recovers the final *meaning* (frozen sentence‑embedding) far earlier in $t$ than it recovers exact *tokens* — and earlier than for ELF — confirming $u_{\text{sem}}$ resolved before $u_{\text{lex}}$.
+- **C4 — efficiency, ELF's currency.** Because the costly semantic decision is made decisively early instead of being deferred to a terminal de‑blur, target Gen‑PPL is reached in **fewer flow steps**, and the dependence on the terminal hard read‑out weakens (ablate the read‑out: ELF degrades sharply, Decisive Flows much less).
+- **C5 — it helps where meaning‑order matters.** Largest wins on long‑form coherence, summarization faithfulness, and controllable generation by intervening on the *early semantic* state (paraphrase‑robust control), vs brittle token/embedding edits in ELF.
 
-**Ablations.** spectrally‑shaped space vs raw ELF space (the core claim — same flow, only coordinates change); remove $\mathcal L_{\text{order}}$ (split but unordered → does the band edge blur and the schedule lose monotonicity?); remove $\mathcal L_{\text{within}\downarrow}$ (does surface variance leak back into top modes and reinstate surface‑first?); free spectral bias only vs + optional per‑mode schedule (d); source of the meaning signal (sentence encoder vs back‑translation vs entities).
+**Ablations.** $\beta_t\!\equiv\!0$ (recovers ELF — isolates the entire contribution); fix $M_t\!=\!I$ (commit, but not semantic‑first — isolates the *schedule* from the *commitment*); reverse the schedule (lexical‑first — should hurt, proving order matters); codebook vs minibatch responsibilities; source of $P_{\text{sem}}$ (sentence‑encoder vs syntactic vs answer‑bearing).
 
 ## 8. Risks
 
-- **The spectrum may not separate cleanly.** Meaning and surface variance could be entangled in a way no orthonormal re‑sorting untangles (no elbow). C1 is the early tripwire, on a frozen encoder, before any expensive training.
-- **Total‑covariance is a linear lens; meaning may be nonlinear.** Mitigation: the eigenbasis is of a *learned* $\phi$ (so the geometry can be curved into linearity), and a kernelized / local‑covariance variant if needed. The law $\tau_k\propto\lambda_k^{-1}$ is cleanest linearly but the *ordering* it implies is observed in deep models too.
-- **The meaning signal defines "semantic" externally** (shared with any essay‑faithful method, incl. SCF). We test sensitivity to its source (C5 ablation) and treat fully unsupervised spectral shaping as the harder follow‑up.
-- **Worst case** the shaped space reduces to ELF's and we recover an ELF‑class model — **bounded downside**, and C1 tells us cheaply whether we are in that case.
+- **Mode collapse / diversity loss** — the central risk (§5); defended by committing only in the low‑dim semantic subspace early and keeping lexical commitment soft, plus standard entropy/diversity monitoring. C2 watches for it directly.
+- **$P_{\text{sem}}$ externally defines "semantic"** — a modeling choice; tested for sensitivity, with fully‑emergent semantic subspaces as the harder follow‑up.
+- **Responsibility estimation cost** — minibatch responsibilities add a softmax over candidates per step; the codebook variant amortizes it, and it composes with the d²Cache/efficiency stack.
+- **Worst case** the annealing buys nothing and we fall back to $\beta\!=\!0$ — i.e., we recover an ELF‑class model. Bounded downside, because ELF is the no‑commitment limit of our objective.
 
 ---
 
 ## References
 
-**From this folder (lessons taken and surpassed)**
-- *ELF: Embedded Language Flows* — Hu, Qiu, Lu, Zhao, Li, Kim, Andreas, He (MIT). "Stay in continuous space; discretize only at the end." We keep this and leave its Flow Matching *entirely untouched* — we re‑tune only the space's spectrum. https://arxiv.org/abs/2605.10938 · code: https://github.com/lillian039/ELF
-- *LangFlow: Continuous Diffusion Rivals Discrete* — learns a single **scalar** noise schedule (info‑uniform, Gumbel). PRISM generalizes "schedule" to a **spectrum** induced by geometry. https://arxiv.org/abs/2604.11748
-- *Continuous Latent Diffusion Language Model (Cola)* — a **compressed** semantic latent via Text‑VAE + block‑causal prior; separates semantics by *bottleneck*, not by ordering the diffusion's mode‑emergence spectrum. Positioned against in §6. https://arxiv.org/abs/2605.06548
-- *Semantic Corruption Flows* (this folder's proposal) — answers the essay by **learning the forward corruption**; PRISM answers by **leaving physics alone and moving the coordinates**. The complementary, and we argue simpler, lever.
+**From this folder (the lessons taken and surpassed)**
+- *ELF: Embedded Language Flows* — continuous embedding‑space Flow Matching; removed per‑step token anchoring; we remove the *mean‑velocity* assumption it kept. https://arxiv.org/abs/2605.10938
+- *LangFlow* — learnable *scalar* noise schedule + self‑conditioning; we learn a *commitment* schedule and explain why self‑conditioning helped. https://arxiv.org/abs/2604.11748
+- *Continuous Latent Diffusion Language Model (Cola)* — compressed semantic latent; orthogonal (space, not target). https://arxiv.org/abs/2605.06548
 
-**The mechanism this proposal rests on**
-- *Spectral Bias in the Learning/Sampling Dynamics of Diffusion Models* — the exact law $\tau_k\propto\lambda_k^{-1}$: high‑variance modes emerge first. The fact that turns "the schedule is missing" into "the schedule is misaligned." https://arxiv.org/abs/2503.03206
-- Classical backbone: total‑covariance / between‑within decomposition (Fisher LDA); nested‑subspace ordered latents (nested dropout) — repurposed here from *discrimination* to *generation order*.
+**Sibling proposals in this folder (distinct axes — not duplicated)**
+- *PRISM* — changes the *noise variance per spectral mode*. *Semantic Corruption Flows* — changes the *forward corruption operator*. **Decisive Flows changes the *regression target* and its commitment schedule** — a third, independent axis, composable with both.
 
-**Conceptual precedent (non‑Gaussian / structured order — images)**
-- *Blurring Diffusion* / *Inverse Heat Dissipation* (Hoogeboom & Salimans, 2022; Rissanen et al., 2022) — coarse‑to‑fine via a *fixed spatial‑frequency* spectrum. PRISM is the language analog with a **learned semantic** spectrum, and it does not require changing the forward process to get the ordering.
+**Field context surfaced in the literature sweep**
+- *Mean‑seeking / posterior‑mean prediction in diffusion* — the conditional‑expectation target underlying flow matching; benign blur for images, off‑manifold for multimodal language.
+- *OT‑/multisample Flow Matching* — straighter paths to the *same* mean target; orthogonal and composable (positioned against in §6).
+- *DDOT: Flexible‑length Text Infilling* (arXiv 2506.13579) — *discrete* diffusion that denoises token positions; different axis (structure variable) and discrete, not a scheduled‑mode target.
 
 **The essay (provided as screenshots)**
-- *noise schedule ≠ generation schedule*; *Generation space defines what a state is / Generation schedule defines how states should move*; the *stop‑halfway* diagnostic; $u=u_{\text{sem}}+u_{\text{lex}}$ with $u_{\text{sem}}$ to be resolved before $u_{\text{lex}}$; `meaning → structure → text`; *"learn **where** meaning becomes text."*
+- *noise schedule ≠ generation schedule*; the *stop‑halfway* diagnostic; $u=u_{\text{sem}}+u_{\text{lex}}$, resolve semantic before lexical; `meaning → structure → text`; *"learn **where** meaning becomes text."*
 
 ---
 
-*Image diffusion never needed a clever schedule — it got coarse‑first for free because pixel variance is coarse structure. Language got the opposite spectrum, so the same physics generates surface‑first: the essay's `noise → tokens`. PRISM's claim is that the generation schedule was never the missing piece — the **coordinates** were. Re‑tune the latent so its variance spectrum is the semantic spectrum, and `meaning → structure → text` is what diffusion does on its own, with "where meaning becomes text" reported as the band edge $K^\star$. C1 decides it on a frozen encoder, before a single flow step is trained.*
+*Image diffusion got its coarse‑to‑fine schedule for free because, for images, the mean of the posterior is a valid blurry picture. Language has no such luck: the mean of two meanings is a non‑meaning, and continuous DLMs have been flowing toward it the whole time — patching the damage with a hard token read‑out at the very end. Decisive Flows stops flowing toward the average and starts flowing toward a chosen meaning, committing semantics before lexis. That makes the **regression target** — untouched by ELF, LangFlow, and every continuous DLM — the object of study, and turns the velocity field from an averager into the meaning‑first generator the essay asks for. C1 decides it on a frozen checkpoint, before a single training step.*
