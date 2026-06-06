@@ -1,135 +1,120 @@
-# Marginalize, Don't Vote
-### Sampling‑Free Self‑Consistency for Diffusion LMs via Amortized Reasoning Marginalization
+# Explore the Path, Not the Token
+### Coherent Exploration for Reinforcement Learning in Diffusion Language Models
 
-**A proposal written in the methodological style of SPG: take a quantity everyone estimates with a *naive, biased* procedure, characterize the bias precisely, replace it with a cheap *debiased estimator*, and show large gains on reasoning benchmarks.** SPG did this for the *policy gradient* (intractable likelihood → biased ELBO surrogate → sandwiched bound). This proposal does it for *test‑time reasoning aggregation* — and the fix exploits a property **only diffusion LMs have**.
+**An RL‑for‑DLM proposal in SPG's methodological style: isolate one factor of the policy‑gradient pipeline that everyone borrows unchanged from autoregressive RL, show it is *structurally broken* for diffusion models, characterize the failure precisely, and replace it with a principled, DLM‑native mechanism — validated on reasoning benchmarks.**
 
-> **The hook in one sentence.** A diffusion LM can answer a question *with its chain‑of‑thought still masked*, because masked‑diffusion training amortizes the marginalization over reasoning — so instead of sampling 64 chains and majority‑voting (the universal test‑time‑reasoning recipe), you can **read a debiased estimate of the reasoning‑marginalized answer posterior almost for free.** Autoregressive models structurally cannot do this.
+> **The hook.** GRPO‑style RL only learns when a group of rollouts has **reward variance** — i.e., when the policy *explores*. In autoregressive models you dial exploration with one harmless knob: sampling **temperature**. **That knob is broken for diffusion LMs.** Because a DLM commits many tokens *in parallel* from per‑position marginals, raising temperature doesn't produce *diverse valid attempts* — it produces *incoherent* ones (the jointly‑sampled tokens stop agreeing), which earn zero reward and teach nothing. So diffusion RL is silently **exploration‑starved**: too little temperature → identical rollouts → no signal; too much → garbage rollouts → no signal. We give the policy its exploration back by **exploring in trajectory space, not token space** — diversifying *which tokens are committed when*, while keeping every individual commitment cold and coherent — and derive the corrected policy gradient for it.
+
+This is a **different factor** of the same gradient SPG and DACA‑GRPO touch (SPG: the likelihood term; DACA: the credit weights; ours: the exploration distribution), so it **composes** with both.
 
 ---
 
 ## Table of Contents
-1. [The quantity everyone is secretly estimating](#1-the-quantity-everyone-is-secretly-estimating)
-2. [The DLM‑only fact that changes the game](#2-the-dlm-only-fact-that-changes-the-game)
-3. [Where the cheap estimate is biased (the SPG move)](#3-where-the-cheap-estimate-is-biased-the-spg-move)
-4. [The estimator: CV‑Marg](#4-the-estimator-cv-marg)
-5. [Why this is not self‑consistency, Prophet, or temporal voting](#5-why-this-is-not-self-consistency-prophet-or-temporal-voting)
+1. [Background: RL needs reward variance, reward variance needs exploration](#1-background)
+2. [The structural failure: temperature is broken for DLMs](#2-the-structural-failure-temperature-is-broken-for-dlms)
+3. [The fix: explore the path, not the token](#3-the-fix-explore-the-path-not-the-token)
+4. [The corrected policy gradient](#4-the-corrected-policy-gradient)
+5. [Why this is not SPG, DACA, dUltra, or DCoLT](#5-why-this-is-not-spg-daca-dultra-or-dcolt)
 6. [Experiments & falsifiable claims](#6-experiments--falsifiable-claims)
 7. [Risks](#7-risks)
 8. [References](#references)
 
 ---
 
-## 1. The quantity everyone is secretly estimating
+## 1. Background
 
-For a question $q$ with latent reasoning $r$ and answer $a$, the *Bayes‑optimal* answer is the mode of the **reasoning‑marginalized posterior**
+RL with verifiable rewards (RLVR / GRPO), the workhorse of modern reasoning training and the framework SPG operates in, works as follows for a prompt $q$:
+
+1. Sample a **group** of $G$ rollouts $\{x_1,\dots,x_G\}$ from the policy $\pi_\theta(\cdot\mid q)$.
+2. Score them with a verifier, $R(x_i)\in\{0,1\}$ (correct / incorrect).
+3. Form the group‑relative advantage $A(x_i) = \dfrac{R(x_i)-\bar R}{\mathrm{std}(R)}$ and update toward high‑advantage rollouts.
+
+The learning signal is **proportional to the spread of $R$ within the group.** If all $G$ rollouts are identical (all right or all wrong), $A\equiv 0$ and the gradient vanishes. The signal therefore depends entirely on the policy's **exploration**: the group must contain *diverse, individually‑coherent attempts* so that some succeed and some fail. This is the engine of RLVR — and it is the part that breaks for diffusion models.
+
+## 2. The structural failure: temperature is broken for DLMs
+
+In an **autoregressive** policy, exploration is dialed by a single scalar — sampling temperature $\tau$ on each token's softmax. It is *harmless* because each token is drawn **conditioned on the actual realized previous tokens**: even at high $\tau$, the sample stays internally consistent (the model conditions on whatever it just sampled). Raising $\tau$ smoothly trades coherence for diversity, and there is a wide usable window. This is why GRPO "just works" for AR.
+
+A **diffusion** policy commits multiple masked positions **in parallel**, each drawn from its own marginal $p_\theta(x_i\mid \text{context})$, *without seeing the other tokens being committed in the same step*. Now raise $\tau$ to explore:
+
+> **Proposition (the exploration bind).** For a diffusion policy, increasing token temperature increases per‑position entropy but, because co‑committed tokens are sampled from a *product of marginals*, it increases the **joint factorization error** super‑linearly: the diverse samples it produces are predominantly **incoherent** (mutually inconsistent tokens), not diverse‑valid. Hence
+> - **low $\tau$** → high‑confidence parallel commits → rollouts collapse to near‑duplicates → $\mathrm{std}(R)\!\to\!0$ → **no signal** (starvation);
+> - **high $\tau$** → factorization blow‑up → incoherent rollouts → $R\!\equiv\!0$ → **no signal** (garbage).
+
+The usable temperature window for a DLM is therefore *strictly narrower* than for an AR model, and on exactly the hard instances RL most needs to learn — where the base policy is **confidently wrong** — it is often *empty*: the policy is too confident to diversify at low $\tau$ and too fragile to stay coherent at high $\tau$. This is a clean, measurable, DLM‑specific defect that the entire DLM‑RL line (d1, UniGRPO, wd1, SPG, DACA‑GRPO) inherits silently, because they all borrow token‑level sampling from AR and spend their novelty on the *gradient*, not the *exploration*.
+
+The root cause is structural: **AR explores in token space along a fixed generation path; a DLM's coherence lives in the path itself.** So exploration must move to where the structure is.
+
+## 3. The fix: explore the path, not the token
+
+We keep every individual token commitment **cold** (low $\tau$, coherent) and instead inject stochasticity into the **denoising trajectory** — the order and schedule by which positions are committed and revisited. Two coherent‑by‑construction exploration operators:
+
+- **Order perturbation.** Randomize *which* low‑confidence positions are committed at each step (instead of always the top‑$k$ most confident). Different commitment orders steer the rollout into different basins — *different reasoning* — while each committed token is still drawn cold, conditioned on a genuine partial context. Diverse **and** coherent.
+- **Stochastic re‑noising (revisitation).** Occasionally re‑mask a committed region and re‑decide it given the now‑richer context. This lets a rollout *escape* the basin the greedy path fell into, producing a genuinely different — but still self‑consistent — final answer.
+
+Intuitively: instead of shaking each token (which shatters coherence), we shake the **route** through the canvas (which preserves it). The result is a group of rollouts that are *individually coherent yet collectively diverse* — restoring the $\mathrm{std}(R)$ that GRPO needs, precisely where token‑temperature cannot.
+
+**Claim:** at any fixed level of per‑sample coherence, path‑space exploration achieves higher *effective rollout diversity* (and thus a stronger advantage signal) than token‑temperature, because it decouples the diversity source from the factorization error.
+
+## 4. The corrected policy gradient
+
+Path‑space exploration changes the sampling distribution, so the gradient must be corrected to stay valid — this is the SPG‑style technical core. Write a rollout as a (final sequence, trajectory) pair $(x,\xi)$ where $\xi$ is the realized commit‑order/revisit schedule drawn from an **exploration kernel** $\rho_\beta(\xi\mid q,\theta)$ (with $\beta$ the exploration strength). The objective is reward of the final sequence, marginal over the nuisance trajectory:
 
 $$
-p(a \mid q) \;=\; \sum_{r} p(a \mid q, r)\, p(r \mid q).
+J(\theta)=\mathbb{E}_{\xi\sim\rho_\beta}\;\mathbb{E}_{x\sim\pi_\theta(\cdot\mid q,\xi)}\big[R(x)\big].
 $$
 
-**Self‑consistency (SC)** — the dominant test‑time reasoning method — is just a Monte‑Carlo estimate of this: sample $N$ chains $r_i \sim p(r\mid q)$, decode $a_i \sim p(a\mid q,r_i)$, and majority‑vote. SC works because more samples shrink the variance of an estimate of $p(a\mid q)$. Its cost is $N$ full generations (typically $N=$ 32–256). Every DLM test‑time‑scaling paper (dVoting, Temporal‑SC, HEX, Reward‑Guided Stitching) is a variance‑reduction or aggregation trick on top of *this same sampling loop*.
+The estimator must address two things SPG and DACA do **not**:
 
-**Nobody has asked whether a diffusion LM even needs the sampling loop.**
+1. **An exploration kernel that is differentiated from the policy.** $\rho_\beta$ controls *exploration* (used at rollout time to enrich the group) but the *update* must reinforce the policy's tendency to produce the good final answer **regardless of the path that found it** — otherwise we reinforce a nuisance. We therefore reinforce the **path‑marginalized** likelihood of the final sequence, estimated over the group, rather than the single sampled trajectory's likelihood. (SPG's intractable‑likelihood machinery is *reused here as a black box* to bound the per‑sample term; our contribution is the marginalization over $\xi$.)
+2. **An importance correction** $\propto \pi_\theta(\cdot\mid q,\xi)/\rho_\beta$ so that exploring with an off‑policy schedule kernel yields an **unbiased** advantage — analogous in spirit to SPG replacing a biased surrogate with a low‑bias one, but here the bias being removed is the **exploration‑induced** one.
 
-## 2. The DLM‑only fact that changes the game
+A schedule for $\beta$ (anneal exploration down as the policy sharpens) and a variance analysis (path‑space exploration provably lowers gradient variance versus temperature at matched coherence) complete the method.
 
-Recall the masked‑diffusion training objective (LLaDA, this folder, Eq. 3): the model is trained to predict masked tokens from a *randomly* masked context, with mask ratio $t\sim U[0,1]$. On reasoning data `[q] [r] [a]`, this means the model is *explicitly trained* on examples where **the entire reasoning $r$ is masked and it must still predict the answer $a$.** Formally, the masked predictor learns to approximate
+## 5. Why this is not SPG, DACA, dUltra, or DCoLT
 
-$$
-p_\theta\big(a \mid q,\, r{=}\textsf{[MASK]}\big)\;\approx\;\sum_{r} p(a\mid q,r)\,p(r\mid q)\;=\;p(a\mid q).
-$$
-
-That is the **reasoning‑marginalized posterior itself** — the very thing SC spends $N$ samples to approximate — available from **a single forward pass** by masking the rationale and reading the answer marginal.
-
-This is **impossible for an autoregressive model.** An AR model conditioned on $q$ with no reasoning produces $p(a\mid q,\,r{=}\varnothing)$ = "answer without thinking," a *different and worse* distribution; it is not a marginalization, because AR never integrates over the unwritten future. The DLM's bidirectional, any‑order training is exactly what turns "reasoning masked" into "reasoning integrated out." **This is the unique structural asset the test‑time‑scaling literature has left on the table.**
-
-## 3. Where the cheap estimate is biased (the SPG move)
-
-If the amortized marginal were exact, we would be done — one forward pass replaces SC. It is not, and the value of the project is in **characterizing the bias precisely** (SPG's signature move) rather than hand‑waving it.
-
-Two distinct, analyzable bias sources:
-
-**(B1) The Jensen / mean‑field gap.** A single forward pass with $r$ masked performs an *internal, amortized* average. But the model is an imperfect integrator: passing a fully‑masked $r$ collapses the reasoning to a single "averaged context" and then predicts $a$, i.e. it computes something like $f(\mathbb{E}[r])$ rather than $\mathbb{E}[f(r)]$. By Jensen, for the nonlinear softmax readout $f$,
-
-$$
-\underbrace{p_\theta(a\mid q, r{=}\textsf{[MASK]})}_{\text{cheap, 1 pass}} \;\ne\; \underbrace{\mathbb{E}_{r\sim p_\theta(r\mid q)}\big[p_\theta(a\mid q,r)\big]}_{\text{true model marginal}} ,
-$$
-
-and the gap has a definite sign structure we can estimate (it systematically *under‑sharpens* on hard, multi‑modal‑reasoning instances where the averaged context is uninformative).
-
-**(B2) Answer‑token factorization.** Decoding a multi‑token answer in parallel from the masked‑$r$ marginal assumes the answer tokens are conditionally independent — the same product‑of‑marginals error studied for parallel decoding. For short answer spans this is small and *measurable*.
-
-The research contribution is to (i) prove these are the only first‑order error terms, (ii) give a cheap per‑instance estimate of their magnitude, and (iii) **debias** — turning a biased one‑pass estimate into a consistent one with a tunable compute dial, exactly as SPG turned a biased one‑sided bound into a low‑bias sandwiched one.
-
-## 4. The estimator: CV‑Marg (control‑variate marginalization)
-
-We interpolate between the cheap‑biased one‑pass marginal and expensive‑unbiased SC using the model's **own partial‑reasoning predictions as control variates**.
-
-```text
-CV-Marg (compute dial m ≪ N)
-  1. p0  <- p_theta(a | q, r = [MASK])              # 1 pass: the amortized marginal (biased, free)
-  2. for k = 1..m:                                   # m ≪ N cheap partial samples
-        unmask a *small* random fraction ρ of r  (partial rationale r̃_k ~ q_ρ)
-        p_k  <- p_theta(a | q, r̃_k)                  # a low-variance sample of the answer marginal
-  3. # control-variate debias: the p_k bracket the Jensen gap; extrapolate ρ -> 1
-     p_hat <- p0 + (1/m) Σ_k w(ρ) ( p_k - p0 )       # consistent as ρ,m grow; = p0 when gap is 0
-  4. answer <- argmax p_hat ;  report calibrated confidence from spread of {p_k}
-```
-
-Intuition: each partial‑reasoning pass $p_k$ reveals how much the answer distribution *moves* as reasoning is filled in — that movement **is** the Jensen gap (B1). Averaging a handful of them, with a weight $w(\rho)$ derived from the noise schedule, extrapolates the masked‑$r$ estimate toward the true marginal. When the gap is zero (easy instances), $p_k\approx p_0$ and CV‑Marg costs ~1 pass; when it is large (hard instances), it spends a few more — an **adaptive, instance‑level compute allocation**, à la SPG spending estimation effort where the bound is loose.
-
-Key properties to establish (the SPG‑style theory section):
-- **Consistency:** $\hat p \to p(a\mid q)$ as $m,\rho\to$ full, recovering SC in the limit.
-- **Bias bound:** $\lvert \hat p - p(a\mid q)\rvert$ bounded by a quantity estimable from $\{p_k\}$ (so we *know* per instance when one pass suffices).
-- **Compute:** target accuracy at $m=4$–$8$ partial passes vs. $N=64$ full chains → an order‑of‑magnitude test‑time saving, *because each pass conditions on a partially‑revealed rather than fully‑sampled rationale.*
-
-## 5. Why this is *not* self‑consistency, Prophet, or temporal voting
-
-| Prior line | What it does | Why CV‑Marg is different |
+| Prior line | What it fixes in the gradient | Why this is different |
 |---|---|---|
-| **Self‑consistency / dVoting / HEX** | Sample $N$ **full** chains, then vote | We **don't sample full chains**; we read the *amortized marginal* (reasoning masked) and debias it with $m\!\ll\!N$ *partial* passes. Different estimand mechanics, ~10× cheaper. |
-| **Prophet** ("knows the answer early") | *When to stop* a single decode (early commit) | Orthogonal: about truncating *one* trajectory. We're about *aggregating the marginal* without trajectories. Composable with it. |
-| **Temporal Self‑Consistency / "Time is a Feature"** | Aggregate the answer prediction **across denoising steps** of one decode | Those average *snapshots of a sampling trajectory*; we exploit the **masked‑training identity** $p_\theta(a\mid q,\textsf{[MASK]})\approx p(a\mid q)$ and a **principled bias correction**, not heuristic temporal averaging. |
-| **SPG / DDPP** | Training‑time use of the intractable likelihood | We are **inference‑time**, **training‑free**, no reward model; same *spirit* (characterize a bias, debias cheaply) on a different problem. |
+| **SPG** | the **likelihood term** (intractable → sandwiched bound) | We fix the **exploration distribution**; we *reuse* SPG's bound as a component. Composable. |
+| **DACA‑GRPO** | the **credit/advantage weights** across the trajectory | We fix **how rollouts are generated** so the group has signal in the first place; DACA assumes signal exists. Composable. |
+| **dUltra** | learns one **best unmasking order** to maximize speed/quality (exploit) | We **inject order *stochasticity* to explore** and correct the gradient for it — opposite goal (explore, not exploit), and an unbiased estimator, not a learned planner. |
+| **DCoLT** | RL over the unmasking **order as the action** (Plackett‑Luce) to improve reasoning | DCoLT *optimizes* the order as part of the answer; we treat the schedule as an **exploration nuisance to marginalize out**, reinforcing the *path‑independent* final answer. Different objective and different estimator. |
 
-The contribution is a **theorem + estimator**: masked‑diffusion training secretly amortizes reasoning marginalization; the cheap readout is biased by an analyzable Jensen/factorization gap; CV‑Marg debiases it at a fraction of self‑consistency's cost. That is a new, DLM‑unique, training‑free test‑time‑reasoning method — not a tweak to the sampling‑and‑voting loop everyone shares.
+The contribution: a **diagnosis** (token temperature is a structurally broken exploration knob for diffusion policies, with a precise factorization‑error mechanism and a measurable empty‑window failure on hard instances) plus a **fix** (coherent path‑space exploration with an unbiased, path‑marginalized policy gradient). It is orthogonal to, and stackable on, every existing DLM‑RL method.
 
 ## 6. Experiments & falsifiable claims
 
-**Models.** LLaDA‑8B, Dream‑7B (off‑the‑shelf; training‑free method).
-**Tasks.** GSM8K, MATH, ARC‑Challenge, CommonsenseQA, StrategyQA — tasks with an identifiable answer region (where "mask the rationale" is well‑defined).
+**Base models / setup.** LLaDA‑8B, Dream‑7B; GRPO/SPG trainer; verifiable‑reward reasoning tasks — **GSM8K, MATH500, Countdown, Sudoku** (the SPG suite, for direct comparability).
 
-- **C1 (the identity holds).** $p_\theta(a\mid q,\textsf{[MASK]})$ is a *meaningfully better* answer estimate than AR's no‑reasoning $p(a\mid q)$ at equal (one) forward pass — and is correlated with the SC marginal. *If the masked‑answer readout is no better than chance, the whole premise dies — this is the first, cheapest experiment to run.*
-- **C2 (bias is real and structured).** The Jensen gap (B1) is measurable, has the predicted sign (under‑sharpening), and concentrates on high‑reasoning‑entropy instances.
-- **C3 (CV‑Marg matches SC far cheaper).** CV‑Marg at $m=4$–$8$ partial passes matches or beats $N=64$ self‑consistency accuracy; the accuracy–compute curve dominates SC, dVoting, and Temporal‑SC at matched compute.
-- **C4 (free calibration).** The spread of $\{p_k\}$ yields a calibrated confidence / abstention signal at no extra cost (selective‑accuracy gains over SC vote‑margin).
-- **C5 (AR cannot do this).** The same recipe on an AR model (drop the rationale) *fails* — confirming the advantage is the diffusion marginalization, not prompt engineering.
+- **C1 (the bind is real).** Sweep token temperature $\tau$ for a diffusion policy and plot, per instance, group reward‑variance and rollout coherence. *Prediction:* a narrow/empty usable window, with the empty cases concentrated on hard, confidently‑wrong instances. *This is the cheap, first experiment; if the window is wide, the premise is wrong and the project stops here.*
+- **C2 (path beats token).** At matched per‑sample coherence, path‑space exploration yields higher effective rollout diversity and higher group reward‑variance than temperature.
+- **C3 (it trains better).** Path‑exploration RL improves final accuracy over identical GRPO/SPG runs that explore via temperature — with the largest gains on the hard tasks (Countdown/Sudoku) where the temperature window is emptiest.
+- **C4 (composability).** Stacking on SPG (likelihood) and DACA (credit) gives additive gains, confirming it fixes an independent factor.
+- **C5 (AR has no such deficit).** The same diagnosis on an AR policy shows a wide temperature window — confirming the deficit is a *diffusion* property, not a generic RL one.
 
-**Ablations.** $\rho$ (reveal fraction) sweep; $m$ sweep; weight $w(\rho)$ from noise schedule vs. learned; answer‑span length vs. factorization error (B2).
+**Ablations.** order‑perturbation vs re‑noising vs both; exploration strength $\beta$ schedule; with/without the importance correction (to show the naive uncorrected version is biased); group size $G$.
 
 ## 7. Risks
 
-- **The amortized marginal may be too biased to rescue cheaply** on some tasks → CV‑Marg gracefully degrades to SC as $m\to N$, so the worst case is "no worse than SC," and C1 tells us up front where one pass suffices.
-- **"Identifiable answer region" requirement** limits v1 to tasks with a localizable answer (the same scope as Prophet); open‑ended generation is future work.
-- **Factorization error (B2)** could dominate for long free‑form answers; mitigated by short‑answer focus and the dependency‑aware corrections now standard for parallel decoding.
+- **Path‑space exploration might still leave gaps** on instances where *every* coherent path gives the same wrong answer (genuine capability gaps, not exploration gaps) — C1/C3 separate the two; we only claim to fix the *exploration* share.
+- **The importance correction could be high‑variance**; mitigations: keep $\rho_\beta$ close to the policy's own sampler, clip ratios (as PPO/GRPO do), anneal $\beta$.
+- **Extra rollout cost** from re‑noising — but it is exploration *replacing* failed temperature rollouts, not added on top, and is bounded by $\beta$.
 
 ---
 
 ## References
 
 **From this folder**
-- *Large Language Diffusion Models (LLaDA)* — the masked‑training objective that amortizes the marginalization (§2).
-- *SPG: Sandwiched Policy Gradient* — the methodological template (characterize a bias from an intractable‑likelihood surrogate; debias cheaply). https://github.com/facebookresearch/SPG
-- *Diffusion LMs Know the Answer Before Decoding (Prophet)* — orthogonal early‑exit; composable. https://github.com/pixeli99/Prophet
+- *SPG: Sandwiched Policy Gradient* — fixes the likelihood term; reused as a component and the methodological template. https://github.com/facebookresearch/SPG
+- *Large Language Diffusion Models (LLaDA)* — the parallel‑commitment sampler whose temperature behavior we diagnose.
 
 **Closest neighbors (positioned against in §5)**
-- *Self‑Consistency Improves CoT Reasoning* — https://arxiv.org/abs/2203.11171
-- *Diffusion of Thoughts (DoT)* — https://arxiv.org/abs/2402.07754
-- *dVoting: Fast Voting for dLLMs* — https://arxiv.org/pdf/2602.12153
-- *Time Is a Feature: Temporal Dynamics in Diffusion LMs* — https://huggingface.co/papers/2508.09138
-- *Test‑Time Scaling via Reward‑Guided Stitching* — https://arxiv.org/abs/2602.22871
-- *Test‑Time Scaling via Hidden Semi‑Autoregressive Experts (HEX)* — https://arxiv.org/html/2510.05040
+- *DACA‑GRPO: Denoising‑Aware Credit Assignment for RL in Diffusion LMs* — https://arxiv.org/abs/2605.16342
+- *dUltra: Ultra‑Fast Diffusion LMs via RL* (learned unmasking planner) — https://arxiv.org/html/2512.21446
+- *DCoLT: Reinforcing the Diffusion Chain of Lateral Thought* (order‑as‑action RL) — https://arxiv.org/pdf/2505.10446
+- *RL for Diffusion LLMs with Entropy‑Guided Step Selection and Stepwise Advantages* — https://arxiv.org/pdf/2603.12554
+- *ParallelBench / factorization‑error analyses of parallel decoding* (mechanism behind the temperature bind) — https://arxiv.org/abs/2510.04767
 
 ---
 
-*Same DNA as SPG — a precise bias in a quantity everyone estimates naively, a cheap principled estimator that fixes it, and reasoning‑benchmark validation — but on an inference‑time problem and exploiting a marginalization that is unique to diffusion language models. The make‑or‑break check (C1) is one forward pass on an existing checkpoint.*
+*Same DNA as SPG: pick one factor of the policy gradient that the field borrowed from AR without checking, prove it is broken for diffusion models (here: exploration via temperature), characterize the failure, and replace it with a DLM‑native, unbiased fix — demonstrated on the same reasoning suite. The make‑or‑break check (C1) is a temperature sweep on an off‑the‑shelf checkpoint.*
